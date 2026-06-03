@@ -1,0 +1,71 @@
+# ============================================================================
+# Secrets & live credentials — NEVER commit these.
+# This project authenticates to Kaggle using a real, logged-in browser session
+# (auth.json). Committing any of the below would leak your Kaggle account and/or
+# the application's signing secrets.
+# ============================================================================
+**/auth.json
+**/request.txt
+**/.env
+**/.env.*
+!**/.env.example
+**/kaggle.json
+*.pem
+*.key
+*.p12
+
+# ============================================================================
+# Per-user runtime data (account-specific; not source)
+# ============================================================================
+**/sessions/
+**/downloads/
+**/logs/
+*.log
+
+# ============================================================================
+# Python
+# ============================================================================
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================================
+# Node / frontend
+# ============================================================================
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.vite/
+**/.tsnode/
+*.tsbuildinfo
+
+# ============================================================================
+# Build / large binary artifacts
+# ============================================================================
+*.zip
+*.tar.gz
+*.7z
+
+# ============================================================================
+# Editors / OS / tooling
+# ============================================================================
+.DS_Store
+**/.DS_Store
+*.local
+.idea/
+.vscode/
+**/.obsidian/
+# Local agent/editor tooling config (machine-specific; may contain local paths)
+.claude/
+
+# ============================================================================
+# Internal working notes (kept out of the public repository)
+# ============================================================================
+Errors/
+Resources/
+ROUND*_PLAN.md

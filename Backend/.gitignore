@@ -1,0 +1,19 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# Live Kaggle session + captured request secrets — NEVER commit
+auth.json
+request.txt
+
+# Runtime artifacts
+downloads/
+sessions/
+logs/
+
+# Backend secrets (also covered by backend/.gitignore)
+backend/.env
+
+# OS
+.DS_Store

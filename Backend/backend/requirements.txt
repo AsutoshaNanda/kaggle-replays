@@ -1,0 +1,35 @@
+# Kaggle Replay Analytics — backend dependencies (pinned to installed versions)
+# Install with:  python -m pip install -r backend/requirements.txt
+# (playwright is shared with Phase 1 and assumed already installed.)
+
+# --- Web framework ---
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+starlette==1.2.1
+
+# --- Data validation / settings ---
+pydantic[email]==2.13.4
+pydantic-settings==2.14.1
+email-validator==2.3.0
+
+# --- Database (async MySQL) ---
+SQLAlchemy==2.0.50
+aiomysql==0.3.2
+alembic==1.18.4
+
+# --- Auth / security ---
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
+cryptography==48.0.0
+
+# --- Rate limiting ---
+slowapi==0.1.9
+limits==5.8.0
+
+# --- Async file IO ---
+aiofiles==25.1.0
+
+# --- Config / logging ---
+python-dotenv==1.2.2
+structlog==25.5.0
