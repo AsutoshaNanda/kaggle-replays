@@ -7,9 +7,14 @@
 **/auth.json
 **/request.txt
 **/.env
+**/.env.local
+**/.env.development
+**/.env.production
+**/.env.*.local
 **/.env.*
 !**/.env.example
 **/kaggle.json
+.kaggle/
 *.pem
 *.key
 *.p12
@@ -21,16 +26,22 @@
 **/downloads/
 **/logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # ============================================================================
 # Python
 # ============================================================================
 **/.venv/
 **/venv/
+env/
 **/__pycache__/
 *.py[cod]
-.pytest_cache/
+*.egg
 *.egg-info/
+wheels/
+.pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
@@ -40,9 +51,19 @@
 **/node_modules/
 **/dist/
 **/dist-ssr/
+build/
+.next/
+.nuxt/
+out/
 **/.vite/
 **/.tsnode/
 *.tsbuildinfo
+
+# ============================================================================
+# Test coverage
+# ============================================================================
+coverage/
+.nyc_output/
 
 # ============================================================================
 # Build / large binary artifacts
@@ -56,9 +77,11 @@
 # ============================================================================
 .DS_Store
 **/.DS_Store
+Thumbs.db
 *.local
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 **/.obsidian/
 # Local agent/editor tooling config (machine-specific; may contain local paths)
 .claude/
