@@ -69,6 +69,7 @@ async def _top_performers(db: AsyncSession, snapshot_id: int) -> list[TopPerform
             select(LeaderboardEntry)
             .where(LeaderboardEntry.snapshot_id == snapshot_id, LeaderboardEntry.is_top_10_percent.is_(True))
             .order_by(LeaderboardEntry.rank.asc())
+            .limit(50)  # the page shows the best performers; keep the payload small
         )
     ).scalars().all()
     performers = []
@@ -187,7 +188,7 @@ async def date_replays(
 
 
 @router.post("/{competition_id}/sync", response_model=LeaderboardSyncResponse)
-@limiter.limit("2/hour")
+@limiter.limit("4/hour")
 async def sync(
     request: Request,
     competition_id: int,

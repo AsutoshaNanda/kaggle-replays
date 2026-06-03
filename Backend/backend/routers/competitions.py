@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import AsyncSessionLocal
 from ..dependencies import get_current_user, get_db, limiter
-from ..models import Competition, User
+from ..models import Competition, Submission, User
 from ..schemas import (
     CompetitionItem,
     CompetitionListResponse,
@@ -97,10 +97,13 @@ async def sync_submissions_now(
     ).scalar_one_or_none()
     if comp is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Competition not owned by user")
-    subs = await kaggle_data_service.sync_submissions(db, current_user.id, comp, force=True)
-    asyncio.create_task(
-        kaggle_data_service.resolve_episode_data(current_user.id, comp.id, force=True)
-    )
+    # Do ALL live Kaggle work in the background so the response never depends on a
+    # slow/flaky upstream call (this is what made "Sync now" fail intermittently).
+    # Return the current cached rows immediately; the frontend polls for updates.
+    subs = (
+        await db.execute(select(Submission).where(Submission.competition_id == comp.id))
+    ).scalars().all()
+    asyncio.create_task(kaggle_data_service.full_resync(current_user.id, comp.id))
     asyncio.create_task(
         leaderboard_worker.run_daily_sync(comp.id, AsyncSessionLocal, get_session_manager())
     )

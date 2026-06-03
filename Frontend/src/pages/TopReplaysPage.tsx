@@ -48,14 +48,16 @@ export function TopReplaysPage(): JSX.Element {
     }
   }, [activeId, reloadKey, notify])
 
-  const handleBackfill = async (): Promise<void> => {
+  const handleSync = async (): Promise<void> => {
     if (activeId === null) return
     setSyncing(true)
     try {
-      await syncLeaderboard(activeId, true)
-      notify('success', 'Backfill scheduled — snapshots will appear shortly. Refresh in a bit.')
+      // backfill=false -> a REAL leaderboard capture: today's standings PLUS the
+      // top performers' replay episode IDs (bounded + paced on the backend).
+      await syncLeaderboard(activeId, false)
+      notify('success', "Capturing today's top performers and their replay IDs — refresh in a few seconds.")
     } catch {
-      notify('error', 'Could not start backfill.')
+      notify('error', 'Could not start sync.')
     } finally {
       setSyncing(false)
     }
@@ -81,13 +83,13 @@ export function TopReplaysPage(): JSX.Element {
         <CompetitionPicker value={activeId} onChange={setActiveId} />
         <button
           type="button"
-          className="btn-ghost"
+          className="btn-primary-glow"
           style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           disabled={syncing || activeId === null}
-          onClick={() => void handleBackfill()}
+          onClick={() => void handleSync()}
         >
           <TargetIcon size={16} />
-          {syncing ? 'Scheduling…' : 'Backfill'}
+          {syncing ? 'Syncing…' : 'Sync now'}
         </button>
         <button
           type="button"
@@ -100,7 +102,7 @@ export function TopReplaysPage(): JSX.Element {
       </div>
       <div className="flex flex-wrap items-center gap-3" style={{ marginBottom: 20 }}>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-          Daily top performers from competition start to today, with their replay episode IDs.
+          The top performers on each captured day, with their replay episode IDs. Click Sync now to capture today.
         </p>
         {!loading && <LastSynced at={syncedAt} />}
       </div>
@@ -116,7 +118,7 @@ export function TopReplaysPage(): JSX.Element {
           <div className="mb-3 flex justify-center" style={{ color: 'var(--text-faint)' }}>
             <InboxIcon size={44} />
           </div>
-          <p>No snapshots yet — run Backfill to reconstruct daily standings.</p>
+          <p>No snapshots yet — click Sync now to capture today's top performers and their replays.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-5">

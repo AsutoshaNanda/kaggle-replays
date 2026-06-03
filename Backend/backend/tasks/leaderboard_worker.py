@@ -15,7 +15,7 @@ import math
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..kaggle_service import fetch_leaderboard, list_episodes, open_page
+from ..kaggle_service import fetch_leaderboard, list_episodes_checked, open_page
 from ..logging_config import get_logger
 from ..models import (
     Competition,
@@ -139,17 +139,32 @@ async def store_snapshot(
     return snapshot
 
 
-async def resolve_top_episodes(page, tokens, db: AsyncSession, snapshot_id: int) -> int:
-    """Resolve and store episode IDs for each top-10% entry in a snapshot.
+# How many top performers to resolve replay episode IDs for. The top 10% can be
+# hundreds of teams; resolving all of them would fire hundreds of ListEpisodes
+# calls and trip Kaggle's rate limit. We only need the best few, so this is
+# bounded and the calls below are paced.
+TOP_PERFORMER_EPISODE_LIMIT = 20
+_EPISODE_DELAY = 0.4  # seconds between sequential ListEpisodes calls
 
-    Skips entries already resolved. Returns the number of new episode links added.
+
+async def resolve_top_episodes(page, tokens, db: AsyncSession, snapshot_id: int) -> int:
+    """Resolve + store replay episode IDs for the TOP-N performers in a snapshot.
+
+    This is what makes the "Top 10% Replays" page useful: each top performer gets
+    their actual replay episode IDs (not just a name). Bounded to the best
+    :data:`TOP_PERFORMER_EPISODE_LIMIT` ranks and PACED with a short delay between
+    calls, stopping on the first error/429 (a later sync resumes) so it never
+    storms Kaggle. Skips entries already resolved. Returns episode links added.
     """
     entries = (
         await db.execute(
-            select(LeaderboardEntry).where(
+            select(LeaderboardEntry)
+            .where(
                 LeaderboardEntry.snapshot_id == snapshot_id,
                 LeaderboardEntry.is_top_10_percent.is_(True),
             )
+            .order_by(LeaderboardEntry.rank.asc())
+            .limit(TOP_PERFORMER_EPISODE_LIMIT)
         )
     ).scalars().all()
 
@@ -164,11 +179,15 @@ async def resolve_top_episodes(page, tokens, db: AsyncSession, snapshot_id: int)
         ).first()
         if already:
             continue
-        episodes = await list_episodes(page, tokens, entry.best_submission_id)
+        episodes, error = await list_episodes_checked(page, tokens, entry.best_submission_id)
+        if error is not None:
+            _log.warning("leaderboard.episodes_stopped", snapshot_id=snapshot_id, reason=error)
+            break  # likely 429 / expired session — stop; a later sync resumes
         for ep in episodes:
             db.add(TopPerformerEpisode(entry_id=entry.id, episode_id=str(ep["id"])))
             added += 1
-    await db.commit()
+        await db.commit()
+        await asyncio.sleep(_EPISODE_DELAY)
     return added
 
 

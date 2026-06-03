@@ -235,6 +235,34 @@ async def resolve_episode_data(user_id: int, competition_id: int, force: bool = 
             await page.close()
 
 
+async def full_resync(user_id: int, competition_id: int) -> None:
+    """Background orchestrator for the manual "Sync now".
+
+    Force-refreshes a competition's submissions, then its episode IDs / counts /
+    skill-rating scores. Deliberately robust: it logs and swallows Kaggle errors
+    so a slow or rate-limited upstream never crashes the task (the HTTP endpoint
+    returns immediately and the UI polls for the results).
+    """
+    from ..database import AsyncSessionLocal
+    from ..logging_config import get_logger
+
+    log = get_logger("backend.kaggle_data_service")
+    try:
+        async with AsyncSessionLocal() as db:
+            comp = (
+                await db.execute(select(Competition).where(Competition.id == competition_id))
+            ).scalar_one_or_none()
+            if comp is None:
+                return
+            await sync_submissions(db, user_id, comp, force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("resync.submissions_error", competition_id=competition_id, error=str(exc))
+    try:
+        await resolve_episode_data(user_id, competition_id, force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("resync.episodes_error", competition_id=competition_id, error=str(exc))
+
+
 async def get_submission_episodes(db: AsyncSession, user_id: int, submission: Submission) -> list[dict]:
     """Return a submission's episodes as ``[{"id","outcome"}, ...]``, cache-first.
 
