@@ -2,7 +2,7 @@
 
 Browse, view, and bulk-download the episode replays from your Kaggle simulation competitions, all from one local web app — with a data layer designed so you never get rate-limited or banned for collecting them.
 
-![Build](https://img.shields.io/github/actions/workflow/status/[GITHUB_USERNAME]/kaggle-replays/ci.yml?label=build) ![License](https://img.shields.io/badge/license-MIT-green) ![Version](https://img.shields.io/badge/version-0.1.0-blue)
+
 
 This README is intentionally thorough. It documents not only how to run the project, but *why* it is built the way it is, and the real problems that shaped it — because almost every non-obvious decision here exists to work around Kaggle's internal API and its aggressive rate limiting.
 
