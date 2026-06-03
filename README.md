@@ -2,11 +2,15 @@
 
 Browse, view, and bulk-download the episode replays from your Kaggle simulation competitions, all from one local web app — with a data layer designed so you never get rate-limited or banned for collecting them.
 
+
 ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 
 **Backend:** ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white) ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-D71F00?logo=sqlalchemy&logoColor=white) ![MySQL](https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white) ![Playwright](https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white) ![Alembic](https://img.shields.io/badge/Alembic-6BA81E?logo=alembic&logoColor=white)
 
 **Frontend:** ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white) ![React Router](https://img.shields.io/badge/React_Router-6-CA4245?logo=reactrouter&logoColor=white) ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?logo=tailwindcss&logoColor=white) ![Axios](https://img.shields.io/badge/Axios-5A29E4?logo=axios&logoColor=white)
+
+
+
 
 This README is intentionally thorough. It documents not only how to run the project, but *why* it is built the way it is, and the real problems that shaped it — because almost every non-obvious decision here exists to work around Kaggle's internal API and its aggressive rate limiting.
 
