@@ -32,6 +32,11 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Auto-enable Pages (build type "workflow") on first run so this step
+          # does not 404 with "Get Pages site failed" when Pages is not yet
+          # enabled. Requires the `pages: write` permission set above.
+          enablement: true
       - name: Upload docs/ as the Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
