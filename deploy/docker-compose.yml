@@ -1,0 +1,77 @@
+name: kaggle-replays
+
+# Full self-host stack: MySQL + the Playwright-enabled backend + the built
+# frontend, fronted by Caddy (automatic HTTPS). Run from this directory:
+#   docker compose up -d --build
+# Values come from deploy/.env (copy deploy/.env.example).
+
+services:
+  db:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+aiomysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ALLOWED_ORIGINS: https://${DOMAIN}
+      DEV_LOGIN_ENABLED: "true"
+      SESSIONS_BASE_DIR: /data/sessions
+      DOWNLOADS_BASE_DIR: /data/downloads
+      LOG_FILE: /data/logs/backend.log
+    volumes:
+      # Your Kaggle session, generated locally and copied here (NOT baked in).
+      - ./auth.json:/app/Backend/auth.json:ro
+      - backend_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: https://api.${DOMAIN}
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  db_data:
+  backend_data:
+  caddy_data:
+  caddy_config:

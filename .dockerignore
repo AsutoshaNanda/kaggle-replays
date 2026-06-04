@@ -1,0 +1,27 @@
+# Keep build contexts small and never bake secrets/runtime data into images.
+.git
+.github
+docs
+Errors
+Resources
+**/.venv
+**/venv
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/dist
+**/dist-ssr
+**/.vite
+**/.tsnode
+*.tsbuildinfo
+Backend/sessions
+Backend/downloads
+Backend/logs
+**/auth.json
+**/request.txt
+**/.env
+**/.env.*
+!**/.env.example
+*.log
+*.zip
+*.tar.gz

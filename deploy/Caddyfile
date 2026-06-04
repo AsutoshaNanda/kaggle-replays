@@ -1,0 +1,31 @@
+# Caddy serves the SPA at your domain and reverse-proxies the API at
+# api.<your-domain>. HTTPS certificates are obtained and renewed automatically
+# via Let's Encrypt (just make sure both DNS records point at this server).
+
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy frontend:80
+
+	# --- Lock the site to your own use (RECOMMENDED) ---------------------------
+	# This app logs every visitor in as you (your Kaggle session), so do not leave
+	# it open to the public. Easiest gate: allow only your IP(s). Find yours at
+	# https://ifconfig.me, uncomment, and replace the example address. Apply the
+	# SAME block to the api.<domain> site below.
+	#
+	#   @blocked not remote_ip 203.0.113.10
+	#   respond @blocked "Forbidden" 403
+	#
+	# Alternative: HTTP basic auth (generate a hash with
+	#   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'yourpass'):
+	#   basic_auth {
+	#       you JDJhJDE0...your-bcrypt-hash...
+	#   }
+}
+
+api.{$DOMAIN} {
+	encode gzip
+	reverse_proxy backend:8000
+
+	#   @blocked not remote_ip 203.0.113.10
+	#   respond @blocked "Forbidden" 403
+}
