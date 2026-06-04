@@ -1,0 +1,6 @@
+# Netlify configuration for the static project site (the landing/showcase page).
+# No build step: it serves the docs/ folder as-is. This publishes the SHOWCASE
+# site only, not the live application.
+[build]
+  publish = "docs"
+  command = ""
