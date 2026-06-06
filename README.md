@@ -69,7 +69,13 @@ Studying replays is one of the best ways to improve a competition agent, but doi
 
 ## Demo
 
-[ADD SCREENSHOT OR GIF HERE]
+Submissions view — real skill-rating scores (not zeros), episode counts, and one-click replay downloads, all served from the local cache:
+
+![Submissions view](docs/screenshots/submissions.png)
+
+Competitions home — browse the competitions you have entered, then drill into submissions, the leaderboard, or the Top 10% replays:
+
+![Competitions home](docs/screenshots/competitions.png)
 
 ## How it works
 
