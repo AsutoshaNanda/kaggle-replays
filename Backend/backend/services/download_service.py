@@ -86,9 +86,11 @@ def history_view(job: DownloadJob) -> dict:
     (rather than ``model_validate`` on the ORM object) avoids a validation error.
     """
     submission = getattr(job, "submission", None)
+    collection = getattr(job, "collection", None)
     return {
         "job_id": job.job_uuid,
         "status": job.status,
+        "job_type": job.job_type,
         "filter_mode": job.filter_mode,
         "format_mode": job.format_mode,
         "is_bulk": job.is_bulk,
@@ -98,6 +100,7 @@ def history_view(job: DownloadJob) -> dict:
         "skipped": job.skipped,
         "submission_title": submission.title if submission else None,
         "submission_score": submission.score if submission else None,
+        "collection_name": collection.name if collection else None,
         "created_at": job.created_at,
         "started_at": job.started_at,
         "completed_at": job.completed_at,

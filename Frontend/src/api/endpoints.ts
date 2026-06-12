@@ -4,6 +4,10 @@
 import { apiClient, BASE_URL, getAccessToken } from './client'
 import type {
   BulkDownloadResponse,
+  CollectionDownloadResponse,
+  CollectionItemFilter,
+  CollectionItemsResponse,
+  CollectionListResponse,
   CompetitionListResponse,
   DownloadHistoryResponse,
   DownloadJob,
@@ -171,6 +175,55 @@ export async function downloadJobFile(jobUuid: string): Promise<Blob> {
     responseType: 'blob',
   })
   return data as Blob
+}
+
+// --- Collections ---
+export async function getCollections(): Promise<CollectionListResponse> {
+  const { data } = await apiClient.get<CollectionListResponse>('/collections')
+  return data
+}
+
+export async function syncCollections(): Promise<CollectionListResponse> {
+  const { data } = await apiClient.post<CollectionListResponse>('/collections/sync', {})
+  return data
+}
+
+export async function getCollectionItems(
+  collectionId: number,
+  itemFilter: CollectionItemFilter,
+): Promise<CollectionItemsResponse> {
+  const { data } = await apiClient.get<CollectionItemsResponse>(
+    `/collections/${collectionId}/items`,
+    { params: { item_filter: itemFilter } },
+  )
+  return data
+}
+
+export async function syncCollectionItems(
+  collectionId: number,
+): Promise<CollectionItemsResponse> {
+  const { data } = await apiClient.post<CollectionItemsResponse>(
+    `/collections/${collectionId}/sync`,
+    {},
+  )
+  return data
+}
+
+export async function startCollectionDownload(
+  collectionId: number,
+  itemFilter: CollectionItemFilter,
+  perCompetitionCap: number,
+): Promise<CollectionDownloadResponse> {
+  const { data } = await apiClient.post<CollectionDownloadResponse>(
+    `/collections/${collectionId}/download`,
+    {
+      item_filter: itemFilter,
+      format_mode: 'zip',
+      per_competition_cap: perCompetitionCap,
+      confirm: true,
+    },
+  )
+  return data
 }
 
 // --- WebSocket URL helper (token in query param; WS can't set headers) ---

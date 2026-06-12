@@ -22,7 +22,7 @@ from .database import AsyncSessionLocal
 from .dependencies import limiter, rate_limit_exceeded_handler
 from .logging_config import configure_logging, get_logger
 from .middleware import RequestContextMiddleware, SecurityHeadersMiddleware
-from .routers import auth, competitions, downloads, leaderboard, submissions, ws
+from .routers import auth, collections, competitions, downloads, leaderboard, submissions, ws
 from .session_manager import get_session_manager
 from .tasks.leaderboard_worker import daily_scheduler_loop
 
@@ -79,7 +79,7 @@ def create_app() -> FastAPI:
     )
 
     # Routers.
-    for module in (auth, competitions, submissions, downloads, ws, leaderboard):
+    for module in (auth, competitions, submissions, downloads, ws, leaderboard, collections):
         app.include_router(module.router)
 
     @app.get("/health", tags=["health"])
