@@ -59,6 +59,7 @@ class User(Base):
     competitions: Mapped[list["Competition"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     submissions: Mapped[list["Submission"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     download_jobs: Mapped[list["DownloadJob"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    collections: Mapped[list["Collection"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class UserSession(Base):
@@ -147,15 +148,78 @@ class Submission(Base):
     download_jobs: Mapped[list["DownloadJob"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
 
 
+class Collection(Base):
+    """Cached Kaggle collection metadata, scoped per user."""
+
+    __tablename__ = "collections"
+    __table_args__ = (UniqueConstraint("kaggle_id", "user_id", name="uk_kaggle_user_collection"),)
+
+    id: Mapped[int] = mapped_column(UINT, primary_key=True, autoincrement=True)
+    kaggle_id: Mapped[int] = mapped_column(UBIGINT, nullable=False)
+    user_id: Mapped[int] = mapped_column(UINT, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    item_count: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    fetched_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    items_synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="collections")
+    items: Mapped[list["CollectionItem"]] = relationship(back_populates="collection", cascade="all, delete-orphan")
+
+
+class CollectionItem(Base):
+    """One cached document inside a collection (kernel/topic/competition/...)."""
+
+    __tablename__ = "collection_items"
+    __table_args__ = (UniqueConstraint("collection_id", "kaggle_doc_id", name="uk_collection_doc"),)
+
+    id: Mapped[int] = mapped_column(UINT, primary_key=True, autoincrement=True)
+    collection_id: Mapped[int] = mapped_column(
+        UINT, ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kaggle_doc_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Plain VARCHAR (not a native ENUM): Kaggle may add document types and an
+    # unknown value must not break the sync upsert.
+    document_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    votes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_comments: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    author_username: Mapped[str | None] = mapped_column(String(100))
+    author_tier: Mapped[str | None] = mapped_column(String(50))
+    medal: Mapped[str | None] = mapped_column(String(20))
+    url: Mapped[str | None] = mapped_column(String(600))
+    create_time: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    update_time: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    raw_json: Mapped[dict | None] = mapped_column(JSON)
+    fetched_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    collection: Mapped["Collection"] = relationship(back_populates="items")
+
+
 class DownloadJob(Base):
-    """One row per initiated download (single submission or bulk)."""
+    """One row per initiated download (episode replays or a collection export)."""
 
     __tablename__ = "download_jobs"
 
     id: Mapped[int] = mapped_column(UINT, primary_key=True, autoincrement=True)
     job_uuid: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
     user_id: Mapped[int] = mapped_column(UINT, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    submission_id: Mapped[int] = mapped_column(UINT, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
+    # Nullable since migration 005: collection jobs have no submission.
+    submission_id: Mapped[int | None] = mapped_column(
+        UINT, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=True
+    )
+    job_type: Mapped[str] = mapped_column(
+        Enum("episodes", "collection", name="job_type_enum"), nullable=False, default="episodes"
+    )
+    collection_id: Mapped[int | None] = mapped_column(
+        UINT, ForeignKey("collections.id", ondelete="CASCADE"), nullable=True
+    )
+    # Collection jobs only: which item types to download (episode jobs leave NULL).
+    item_filter: Mapped[str | None] = mapped_column(
+        Enum("all", "notebooks", "discussions", name="item_filter_enum"), nullable=True
+    )
+    # Collection jobs only: top-N notebooks/discussions per COMPETITION item
+    # (NULL = server default, 0 = no cap).
+    per_competition_cap: Mapped[int | None] = mapped_column(UINT, nullable=True)
     filter_mode: Mapped[str] = mapped_column(
         Enum("all", "win", "lose", "draw", name="filter_mode_enum"), nullable=False, default="all"
     )
@@ -181,7 +245,8 @@ class DownloadJob(Base):
     expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
 
     user: Mapped["User"] = relationship(back_populates="download_jobs")
-    submission: Mapped["Submission"] = relationship(back_populates="download_jobs")
+    submission: Mapped["Submission | None"] = relationship(back_populates="download_jobs")
+    collection: Mapped["Collection | None"] = relationship()
 
 
 class AuditLog(Base):

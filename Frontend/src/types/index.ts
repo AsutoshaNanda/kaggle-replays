@@ -53,6 +53,7 @@ export interface DownloadJob {
 export interface DownloadHistoryEntry {
   job_id: string
   status: DownloadJob['status']
+  job_type: 'episodes' | 'collection'
   filter_mode: EpisodeFilter
   format_mode: FormatMode
   is_bulk: boolean
@@ -62,6 +63,7 @@ export interface DownloadHistoryEntry {
   skipped: number
   submission_title: string | null
   submission_score: number | null
+  collection_name: string | null
   created_at: string | null
   started_at: string | null
   completed_at: string | null
@@ -160,4 +162,43 @@ export interface LeaderboardSyncResponse {
   status: string
   mode: string
   message: string
+}
+
+// --- Collections ---
+export type CollectionItemFilter = 'all' | 'notebooks' | 'discussions'
+
+export interface Collection {
+  id: number
+  kaggle_id: number
+  name: string
+  item_count: number
+  items_synced_at: string | null
+}
+export interface CollectionItem {
+  id: number
+  kaggle_doc_id: string
+  document_type: string // KERNEL | TOPIC | COMPETITION | DATASET | ...
+  title: string
+  votes: number
+  total_comments: number
+  author_username: string | null
+  author_tier: string | null
+  medal: 'gold' | 'silver' | 'bronze' | null
+  url: string | null
+  create_time: string | null
+  update_time: string | null
+}
+export interface CollectionListResponse {
+  collections: Collection[]
+  last_synced_at?: string | null
+}
+export interface CollectionItemsResponse {
+  items: CollectionItem[]
+  total: number
+  last_synced_at?: string | null
+}
+export interface CollectionDownloadResponse {
+  job_id: string
+  total_items: number
+  status: DownloadJob['status']
 }

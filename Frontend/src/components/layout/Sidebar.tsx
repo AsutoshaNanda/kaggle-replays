@@ -2,7 +2,7 @@
 
 import type { JSX, ComponentType } from 'react'
 import { NavLink } from 'react-router-dom'
-import { ChartIcon, TrophyIcon, TargetIcon, DownloadIcon } from '@/components/shared/icons'
+import { ChartIcon, TrophyIcon, TargetIcon, DownloadIcon, PackageIcon } from '@/components/shared/icons'
 
 interface SidebarLink {
   to: string
@@ -15,6 +15,7 @@ const LINKS: SidebarLink[] = [
   { to: '/competitions', label: 'Home', Icon: ChartIcon, end: true },
   { to: '/leaderboard', label: 'Leaderboard', Icon: TrophyIcon },
   { to: '/top-replays', label: 'Top 10% Replays', Icon: TargetIcon },
+  { to: '/collections', label: 'Collections', Icon: PackageIcon },
   { to: '/downloads', label: 'My Downloads', Icon: DownloadIcon },
 ]
 

@@ -145,7 +145,7 @@ async def list_jobs(
         await db.execute(
             select(DownloadJob)
             .where(DownloadJob.user_id == current_user.id)
-            .options(selectinload(DownloadJob.submission))
+            .options(selectinload(DownloadJob.submission), selectinload(DownloadJob.collection))
             .order_by(DownloadJob.created_at.desc())
             .limit(50)
         )

@@ -17,6 +17,7 @@ import { ToastProvider } from '@/components/shared/ToastProvider'
 import { PageWrapper } from '@/components/layout/PageWrapper'
 import { LoginPage } from '@/pages/LoginPage'
 import { LandingPage } from '@/pages/LandingPage'
+import { CollectionsPage } from '@/pages/CollectionsPage'
 import { CompetitionsPage } from '@/pages/CompetitionsPage'
 import { SubmissionsPage } from '@/pages/SubmissionsPage'
 import { DownloadsPage } from '@/pages/DownloadsPage'
@@ -92,6 +93,10 @@ function AnimatedRoutes(): JSX.Element {
           <Route
             path="/top-replays"
             element={<RequireAuth><TopReplaysPage /></RequireAuth>}
+          />
+          <Route
+            path="/collections"
+            element={<RequireAuth><CollectionsPage /></RequireAuth>}
           />
           <Route
             path="/downloads"

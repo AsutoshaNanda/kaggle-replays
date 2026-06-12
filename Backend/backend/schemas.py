@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 FilterMode = Literal["all", "win", "lose", "draw"]
 FormatMode = Literal["json", "zip", "both"]
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
+JobType = Literal["episodes", "collection"]
+CollectionItemFilter = Literal["all", "notebooks", "discussions"]
 
 
 class _StrictModel(BaseModel):
@@ -133,6 +135,67 @@ class EpisodeListResponse(BaseModel):
     note: str | None = None
 
 
+# --- Collections ------------------------------------------------------------
+class CollectionListItem(_ORMModel):
+    """A single collection in ``GET /collections``."""
+
+    id: int
+    kaggle_id: int
+    name: str
+    item_count: int = 0
+    items_synced_at: dt.datetime | None = None
+
+
+class CollectionListResponse(BaseModel):
+    """Response of ``GET /collections``."""
+
+    collections: list[CollectionListItem]
+    last_synced_at: dt.datetime | None = None
+
+
+class CollectionItemSchema(_ORMModel):
+    """A single document inside a collection (kernel/topic/competition/...)."""
+
+    id: int
+    kaggle_doc_id: str
+    document_type: str  # "KERNEL" | "TOPIC" | "COMPETITION" | "DATASET" | ...
+    title: str
+    votes: int = 0
+    total_comments: int = 0
+    author_username: str | None = None
+    author_tier: str | None = None
+    medal: str | None = None  # "gold" | "silver" | "bronze" | None
+    url: str | None = None
+    create_time: dt.datetime | None = None
+    update_time: dt.datetime | None = None
+
+
+class CollectionItemsResponse(BaseModel):
+    """Response of ``GET /collections/{id}/items`` (pre-sorted medal→votes)."""
+
+    items: list[CollectionItemSchema]
+    total: int
+    last_synced_at: dt.datetime | None = None
+
+
+class CollectionDownloadRequest(_StrictModel):
+    """Body of ``POST /collections/{id}/download`` — requires confirmation."""
+
+    item_filter: CollectionItemFilter = "all"
+    format_mode: FormatMode = "zip"
+    # Top-N notebooks AND top-N discussions per COMPETITION item (0 = no cap).
+    per_competition_cap: int = Field(default=50, ge=0, le=1000)
+    confirm: bool = False
+
+
+class CollectionDownloadResponse(BaseModel):
+    """Response of ``POST /collections/{id}/download``."""
+
+    job_id: str
+    total_items: int
+    status: JobStatus
+
+
 # --- Downloads -------------------------------------------------------------
 class DownloadStartRequest(_StrictModel):
     """Body of ``POST /downloads/start``."""
@@ -185,6 +248,7 @@ class JobHistoryItem(_ORMModel):
 
     job_id: str
     status: JobStatus
+    job_type: JobType = "episodes"
     filter_mode: FilterMode
     format_mode: FormatMode
     is_bulk: bool
@@ -194,6 +258,7 @@ class JobHistoryItem(_ORMModel):
     skipped: int
     submission_title: str | None = None
     submission_score: float | None = None
+    collection_name: str | None = None
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
