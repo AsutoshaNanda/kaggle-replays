@@ -23,8 +23,9 @@
 # Per-user runtime data (account-specific; not source)
 # ============================================================================
 **/sessions/
-**/downloads/
+Backend/downloads/
 **/logs/
+# (was `**/downloads/` — that also hid Frontend/src/components/downloads/ source)
 *.log
 npm-debug.log*
 yarn-debug.log*
