@@ -5,6 +5,7 @@ import { apiClient, BASE_URL, getAccessToken } from './client'
 import type {
   BulkDownloadResponse,
   CollectionDownloadResponse,
+  CollectionItemContentsResponse,
   CollectionItemFilter,
   CollectionItemsResponse,
   CollectionListResponse,
@@ -155,6 +156,19 @@ export async function startBulkDownload(
   return data
 }
 
+// Download specific replay episodes by ID (e.g. a top performer's replays on the
+// Top 10% Replays page) — no submission ownership required.
+export async function startReplayDownload(
+  episodeIds: string[],
+  formatMode: FormatMode = 'zip',
+): Promise<StartDownloadResponse> {
+  const { data } = await apiClient.post<StartDownloadResponse>('/downloads/replays', {
+    episode_ids: episodeIds,
+    format_mode: formatMode,
+  })
+  return data
+}
+
 export async function getJobStatus(jobUuid: string): Promise<DownloadJob> {
   const { data } = await apiClient.get<DownloadJob>(`/downloads/${jobUuid}/status`)
   return data
@@ -197,6 +211,18 @@ export async function getCollectionItems(
   const { data } = await apiClient.get<CollectionItemsResponse>(
     `/collections/${collectionId}/items`,
     { params: { item_filter: itemFilter, medals: medals.join(',') } },
+  )
+  return data
+}
+
+// Drill into a COMPETITION/DATASET collection item: its top notebooks +
+// discussions (live, paced, cached server-side).
+export async function getCollectionItemContents(
+  collectionId: number,
+  itemId: number,
+): Promise<CollectionItemContentsResponse> {
+  const { data } = await apiClient.get<CollectionItemContentsResponse>(
+    `/collections/${collectionId}/items/${itemId}/contents`,
   )
   return data
 }

@@ -24,6 +24,7 @@ from ..schemas import (
     JobHistoryResponse,
     JobStatusResponse,
     MessageResponse,
+    ReplayDownloadRequest,
 )
 from ..services import download_service
 from ..tasks.download_worker import run_download_job
@@ -51,6 +52,31 @@ async def start_download(
     asyncio.create_task(run_download_job(job.job_uuid))
     await write_audit(
         db, action="download.start", ip_address=request.state.client_ip,
+        status="success", user_id=current_user.id, resource_type="download_job", resource_id=job.job_uuid,
+    )
+    return DownloadStartResponse(job_id=job.job_uuid, status="queued")
+
+
+@router.post("/replays", response_model=DownloadStartResponse)
+@limiter.limit("10/hour")
+async def download_replays(
+    request: Request,
+    body: ReplayDownloadRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DownloadStartResponse:
+    """Download specific replay episodes by ID (no owned submission needed).
+
+    Powers the Top 10% Replays page: the episode IDs shown there belong to other
+    teams' submissions, so they can't go through the submission-scoped path —
+    replays fetch by id directly.
+    """
+    job = await download_service.create_replay_job(
+        db, current_user.id, body.episode_ids, body.format_mode
+    )
+    asyncio.create_task(run_download_job(job.job_uuid))
+    await write_audit(
+        db, action="download.replays", ip_address=request.state.client_ip,
         status="success", user_id=current_user.id, resource_type="download_job", resource_id=job.job_uuid,
     )
     return DownloadStartResponse(job_id=job.job_uuid, status="queued")

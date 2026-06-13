@@ -215,7 +215,8 @@ class DownloadJob(Base):
     )
     # Collection jobs only: which item types to download (episode jobs leave NULL).
     item_filter: Mapped[str | None] = mapped_column(
-        Enum("all", "notebooks", "discussions", name="item_filter_enum"), nullable=True
+        Enum("all", "notebooks", "discussions", "datasets", "competitions", name="item_filter_enum"),
+        nullable=True,
     )
     # Collection jobs only: top-N notebooks/discussions per COMPETITION item
     # (NULL = server default, 0 = no cap).
@@ -223,6 +224,9 @@ class DownloadJob(Base):
     # Collection jobs only: comma-joined medals ("gold,silver") to restrict
     # downloaded notebooks; NULL = no medal filter (all notebooks).
     medal_filter: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Replay-by-id jobs only: explicit episode IDs to download (no owned
+    # submission). NULL for submission-based and collection jobs.
+    episode_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     filter_mode: Mapped[str] = mapped_column(
         Enum("all", "win", "lose", "draw", name="filter_mode_enum"), nullable=False, default="all"
     )

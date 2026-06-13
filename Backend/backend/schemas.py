@@ -17,7 +17,7 @@ FilterMode = Literal["all", "win", "lose", "draw"]
 FormatMode = Literal["json", "zip", "both"]
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 JobType = Literal["episodes", "collection"]
-CollectionItemFilter = Literal["all", "notebooks", "discussions"]
+CollectionItemFilter = Literal["all", "notebooks", "discussions", "datasets", "competitions"]
 Medal = Literal["gold", "silver", "bronze"]
 
 
@@ -179,6 +179,23 @@ class CollectionItemsResponse(BaseModel):
     last_synced_at: dt.datetime | None = None
 
 
+class CollectionDrillItem(BaseModel):
+    """One notebook or discussion enumerated under a COMPETITION/DATASET item."""
+
+    title: str
+    url: str | None = None
+    votes: int | None = None
+    medal: str | None = None  # "gold" | "silver" | "bronze" | None
+    author_username: str | None = None
+
+
+class CollectionItemContentsResponse(BaseModel):
+    """Response of ``GET /collections/{id}/items/{item_id}/contents`` (drill-down)."""
+
+    notebooks: list[CollectionDrillItem]
+    discussions: list[CollectionDrillItem]
+
+
 class CollectionDownloadRequest(_StrictModel):
     """Body of ``POST /collections/{id}/download`` — requires confirmation."""
 
@@ -213,6 +230,17 @@ class DownloadStartResponse(BaseModel):
 
     job_id: str
     status: JobStatus
+
+
+class ReplayDownloadRequest(_StrictModel):
+    """Body of ``POST /downloads/replays`` — download specific episodes by ID.
+
+    Used by the Top 10% Replays page to grab a performer's replays directly; no
+    owned submission is involved. IDs are bounded to keep one job sane.
+    """
+
+    episode_ids: list[str] = Field(min_length=1, max_length=200)
+    format_mode: FormatMode = "zip"
 
 
 class BulkDownloadRequest(_StrictModel):

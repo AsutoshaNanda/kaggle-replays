@@ -516,6 +516,23 @@ def parse_kernel_ref(url: str | None) -> tuple[str, str] | None:
     return owner, slug
 
 
+def parse_dataset_ref(url: str | None) -> tuple[str, str] | None:
+    """Parse ``/datasets/owner/slug`` into a CLI-safe ``(owner, slug)``."""
+    parts = (url or "").strip("/").split("/")
+    if len(parts) < 3 or parts[0] != "datasets":
+        return None
+    owner, slug = parts[1], parts[2]
+    if not (_REF_SEGMENT_RE.match(owner) and _REF_SEGMENT_RE.match(slug)):
+        return None
+    return owner, slug
+
+
+def trailing_int(value: str | None) -> int | None:
+    """Extract the trailing numeric id from a doc id like ``competition-1866141``."""
+    match = re.search(r"(\d+)$", value or "")
+    return int(match.group(1)) if match else None
+
+
 def topic_id_from_doc(item_url: str | None, kaggle_doc_id: str) -> int | None:
     """Extract the numeric forumTopicId for a TOPIC item.
 

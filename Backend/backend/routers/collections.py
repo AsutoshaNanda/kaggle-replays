@@ -19,6 +19,8 @@ from ..models import User
 from ..schemas import (
     CollectionDownloadRequest,
     CollectionDownloadResponse,
+    CollectionDrillItem,
+    CollectionItemContentsResponse,
     CollectionItemSchema,
     CollectionItemsResponse,
     CollectionListItem,
@@ -26,10 +28,11 @@ from ..schemas import (
 )
 from ..services import collection_service
 from ..tasks.collection_worker import run_collection_job
+from ..utils.cache import episode_cache
 
 router = APIRouter(prefix="/collections", tags=["collections"])
 
-_ITEM_FILTERS = ("all", "notebooks", "discussions")
+_ITEM_FILTERS = ("all", "notebooks", "discussions", "datasets", "competitions")
 
 
 @router.get("", response_model=CollectionListResponse)
@@ -74,7 +77,7 @@ def _parse_medals(raw: str) -> set[str]:
 @router.get("/{collection_id}/items", response_model=CollectionItemsResponse)
 async def get_collection_items(
     collection_id: int,
-    item_filter: str = Query("all", pattern="^(all|notebooks|discussions)$"),
+    item_filter: str = Query("all", pattern="^(all|notebooks|discussions|datasets|competitions)$"),
     medals: str = Query("", description="CSV subset of gold,silver,bronze (notebooks only)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -89,6 +92,52 @@ async def get_collection_items(
         items=[CollectionItemSchema.model_validate(collection_service.item_view(i)) for i in selected],
         total=len(selected),
         last_synced_at=collection.items_synced_at,
+    )
+
+
+@router.get(
+    "/{collection_id}/items/{item_id}/contents",
+    response_model=CollectionItemContentsResponse,
+)
+@limiter.limit("30/hour")
+async def get_collection_item_contents(
+    request: Request,
+    collection_id: int,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CollectionItemContentsResponse:
+    """Drill into a COMPETITION/DATASET item: its top notebooks + discussions.
+
+    A live (paced) Kaggle enumeration so the user can browse what a saved
+    competition or dataset contains without leaving the app. Results are cached
+    briefly per item to keep repeat opens cheap.
+    """
+    collection = await collection_service.get_owned_collection(db, current_user.id, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
+    item = await collection_service.get_collection_item(db, collection.id, item_id)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+    if item.document_type not in collection_service.DRILLDOWN_DOC_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only competitions and datasets can be drilled into.",
+        )
+
+    cache_key = f"collection_contents:{item.id}"
+    cached = await episode_cache.get(cache_key)
+    if cached is not None:
+        return CollectionItemContentsResponse(**cached)
+
+    page, tokens = await get_api_session(current_user.id)
+    contents, error = await collection_service.drilldown_item(page, tokens, item)
+    if error is not None and not contents["notebooks"] and not contents["discussions"]:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=error)
+    await episode_cache.set(cache_key, contents, ttl=300)
+    return CollectionItemContentsResponse(
+        notebooks=[CollectionDrillItem(**n) for n in contents["notebooks"]],
+        discussions=[CollectionDrillItem(**d) for d in contents["discussions"]],
     )
 
 

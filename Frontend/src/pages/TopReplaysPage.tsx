@@ -5,12 +5,13 @@
 
 import { useEffect, useState, type JSX } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getLeaderboardHistory, syncLeaderboard } from '@/api/endpoints'
+import { getLeaderboardHistory, startReplayDownload, syncLeaderboard } from '@/api/endpoints'
 import { useToast } from '@/components/shared/ToastProvider'
 import { LoadingSkeleton } from '@/components/shared/LoadingSkeleton'
 import { CompetitionPicker } from '@/components/shared/CompetitionPicker'
 import { LastSynced } from '@/components/shared/LastSynced'
-import { ArrowLeftIcon, InboxIcon, TargetIcon } from '@/components/shared/icons'
+import { ArrowLeftIcon, DownloadIcon, InboxIcon, TargetIcon } from '@/components/shared/icons'
+import { useDownloadStore } from '@/store/downloadStore'
 import type { LeaderboardDay } from '@/types'
 
 export function TopReplaysPage(): JSX.Element {
@@ -18,12 +19,16 @@ export function TopReplaysPage(): JSX.Element {
   const navigate = useNavigate()
   const { notify } = useToast()
 
+  const setActiveJobId = useDownloadStore((s) => s.setActiveJobId)
+
   const [activeId, setActiveId] = useState<number | null>(routeId ? Number(routeId) : null)
   const [days, setDays] = useState<LeaderboardDay[]>([])
   const [syncedAt, setSyncedAt] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
+  // Which episode chip is currently kicking off a download (disables it briefly).
+  const [downloadingEid, setDownloadingEid] = useState<string | null>(null)
 
   // Active-flag guard: under React.StrictMode the effect runs twice in dev; the
   // flag ensures only the current invocation can toast, so a failure shows at
@@ -54,12 +59,34 @@ export function TopReplaysPage(): JSX.Element {
     try {
       // backfill=false -> a REAL leaderboard capture: today's standings PLUS the
       // top performers' replay episode IDs (bounded + paced on the backend).
-      await syncLeaderboard(activeId, false)
-      notify('success', "Capturing today's top performers and their replay IDs — refresh in a few seconds.")
-    } catch {
-      notify('error', 'Could not start sync.')
+      const res = await syncLeaderboard(activeId, false)
+      if (res.status === 'skipped') {
+        notify('info', 'Already synced moments ago — hit Refresh to see the latest.')
+      } else {
+        notify('success', "Capturing today's top performers and their replay IDs — refresh in a few seconds.")
+      }
+    } catch (err) {
+      // 429s are already surfaced (with a Retry-After countdown) by the global
+      // axios interceptor — don't stack a second, misleading error toast.
+      if ((err as { response?: { status?: number } })?.response?.status !== 429) {
+        notify('error', 'Could not start sync.')
+      }
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleDownloadReplay = async (eid: string): Promise<void> => {
+    setDownloadingEid(eid)
+    try {
+      const res = await startReplayDownload([eid])
+      setActiveJobId(res.job_id)
+      notify('success', `Downloading replay ${eid}.`)
+      navigate('/downloads')
+    } catch {
+      notify('error', 'Could not start the replay download.')
+    } finally {
+      setDownloadingEid(null)
     }
   }
 
@@ -100,11 +127,19 @@ export function TopReplaysPage(): JSX.Element {
           Refresh
         </button>
       </div>
-      <div className="flex flex-wrap items-center gap-3" style={{ marginBottom: 20 }}>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-          The top performers on each captured day, with their replay episode IDs. Click Sync now to capture today.
+      <div className="flex flex-col gap-2" style={{ marginBottom: 20 }}>
+        <div className="flex flex-wrap items-center gap-3">
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', margin: 0 }}>
+            The leaderboard's top performers on each captured day, with their replay episode IDs —
+            click an ID to download that replay. Click Sync now to capture today.
+          </p>
+          {!loading && <LastSynced at={syncedAt} />}
+        </div>
+        <p style={{ color: 'var(--text-faint)', fontSize: '0.8rem', margin: 0 }}>
+          These are the top teams' replays (not your own submissions), so you don't need to have
+          submitted. A competition shows none if it hasn't been synced yet, the last sync was
+          rate-limited by Kaggle before resolving, or it isn't a simulation competition with replays.
         </p>
-        {!loading && <LastSynced at={syncedAt} />}
       </div>
 
       {loading ? (
@@ -130,6 +165,18 @@ export function TopReplaysPage(): JSX.Element {
                   {day.total_teams.toLocaleString()} teams · top {day.top10_cutoff_rank}
                 </span>
               </div>
+              {!day.top_performers.some((p) => p.episode_ids.length > 0) && (
+                <p
+                  style={{
+                    color: 'var(--text-faint)',
+                    fontSize: '0.82rem',
+                    margin: '0 0 12px',
+                  }}
+                >
+                  No replay IDs resolved for this day — Sync now again (Kaggle may have rate-limited
+                  the last attempt), or this competition may not expose replays.
+                </p>
+              )}
               <div className="flex flex-col gap-3">
                 {day.top_performers.slice(0, 50).map((p) => (
                   <div
@@ -153,19 +200,30 @@ export function TopReplaysPage(): JSX.Element {
                     {p.episode_ids.length > 0 && (
                       <div className="flex flex-wrap gap-2 mt-2">
                         {p.episode_ids.map((eid) => (
-                          <span
+                          <button
                             key={eid}
+                            type="button"
                             className="mono"
+                            disabled={downloadingEid === eid}
+                            onClick={() => void handleDownloadReplay(eid)}
+                            title="Download this replay (.json)"
                             style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
                               fontSize: '0.72rem',
-                              padding: '2px 8px',
+                              padding: '3px 9px',
                               borderRadius: 6,
+                              border: '1px solid var(--border-default)',
                               background: 'var(--bg-overlay)',
                               color: 'var(--text-muted)',
+                              cursor: downloadingEid === eid ? 'progress' : 'pointer',
+                              opacity: downloadingEid === eid ? 0.6 : 1,
                             }}
                           >
+                            <DownloadIcon size={12} />
                             {eid}
-                          </span>
+                          </button>
                         ))}
                       </div>
                     )}

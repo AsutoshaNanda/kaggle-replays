@@ -37,10 +37,18 @@ async def run_download_job(job_uuid: str) -> None:
         job = (await db.execute(select(DownloadJob).where(DownloadJob.job_uuid == job_uuid))).scalar_one_or_none()
         if job is None:
             return
-        submission = (await db.execute(select(Submission).where(Submission.id == job.submission_id))).scalar_one_or_none()
-        if submission is None:
-            await _fail(db, job, "Submission not found")
-            return
+
+        # Replay-by-id jobs carry an explicit episode list and no submission;
+        # everything else is the submission-scoped path.
+        is_replay = job.submission_id is None and bool(job.episode_ids)
+        submission = None
+        if not is_replay:
+            submission = (
+                await db.execute(select(Submission).where(Submission.id == job.submission_id))
+            ).scalar_one_or_none()
+            if submission is None:
+                await _fail(db, job, "Submission not found")
+                return
 
         job.status = "running"
         job.started_at = dt.datetime.now(dt.timezone.utc)
@@ -48,7 +56,10 @@ async def run_download_job(job_uuid: str) -> None:
         _log.info("download.started", job=job_uuid, user_id=job.user_id)
 
         try:
-            await _execute(db, job, submission)
+            if is_replay:
+                await _execute_replays(db, job)
+            else:
+                await _execute(db, job, submission)
         except Exception as exc:  # noqa: BLE001
             _log.error("download.failed", job=job_uuid, error=str(exc))
             await _fail(db, job, sanitize_error(str(exc)))
@@ -91,6 +102,63 @@ async def _execute(db, job: DownloadJob, submission: Submission) -> None:
 
     # Nothing matched (0-episode submission or an outcome filter with no hits):
     # finish cleanly with no output file so the UI doesn't offer an empty ZIP.
+    if completed == 0:
+        job.status = "done"
+        job.output_path = None
+        job.completed_at = dt.datetime.now(dt.timezone.utc)
+        await db.commit()
+        _log.info("download.done_empty", job=job.job_uuid, total=job.total)
+        return
+
+    output_path = str(out_dir)
+    if job.format_mode in ("zip", "both"):
+        zip_path = make_zip(out_dir, out_dir)
+        output_path = str(zip_path)
+        if job.format_mode == "zip":
+            for jf in out_dir.glob("*.json"):
+                jf.unlink()
+
+    job.status = "done"
+    job.output_path = output_path
+    job.completed_at = dt.datetime.now(dt.timezone.utc)
+    job.expires_at = job.completed_at + dt.timedelta(hours=_settings.JOB_OUTPUT_TTL_HOURS)
+    await db.commit()
+    _log.info("download.done", job=job.job_uuid, completed=job.completed, failed=job.failed_count)
+
+
+async def _execute_replays(db, job: DownloadJob) -> None:
+    """Download an explicit list of replay episode IDs (no submission lookup).
+
+    Identical packaging to :func:`_execute`, but the episode set comes straight
+    from ``job.episode_ids`` and there's no outcome filter to apply.
+    """
+    manager = get_session_manager()
+    context = await manager.get_context(job.user_id)
+    page, tokens = await open_page(context)
+    wanted = [str(e) for e in (job.episode_ids or [])]
+    try:
+        out_dir = ensure_dir(safe_output_path(_settings.downloads_base_path, job.user_id, job.job_uuid))
+        job.total = len(wanted)
+        await db.commit()
+
+        import downloader  # project-root module (already on sys.path)
+
+        completed = failed = 0
+        for batch in _chunks(wanted, _BATCH):
+            results = await downloader.fetch_replay_batch(page, batch)
+            for res in results:
+                eid = str(res["id"])
+                if res.get("status") == 200 and res.get("text") is not None:
+                    (out_dir / f"{eid}.json").write_text(res["text"], encoding="utf-8")
+                    completed += 1
+                else:
+                    failed += 1
+                job.latest_episode_id = eid
+            job.completed, job.failed_count = completed, failed
+            await db.commit()
+    finally:
+        await page.close()
+
     if completed == 0:
         job.status = "done"
         job.output_path = None

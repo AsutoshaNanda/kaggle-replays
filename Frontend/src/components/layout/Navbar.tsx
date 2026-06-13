@@ -38,7 +38,7 @@ export function Navbar(): JSX.Element {
       className="fixed top-0 left-0 right-0 flex items-center px-4 md:px-6"
       style={{
         height: 56,
-        background: 'rgba(250, 248, 243, 0.85)',
+        background: 'var(--nav-bg)',
         backdropFilter: 'blur(20px)',
         borderBottom: '1px solid var(--border-subtle)',
         zIndex: 100,
