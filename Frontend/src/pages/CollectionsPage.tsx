@@ -11,6 +11,7 @@ import {
   syncCollectionItems,
   syncCollections,
 } from '@/api/endpoints'
+import { CollectionItemDrawer } from '@/components/collections/CollectionItemDrawer'
 import { ConfirmModal } from '@/components/shared/ConfirmModal'
 import { LastSynced } from '@/components/shared/LastSynced'
 import { LoadingSkeleton } from '@/components/shared/LoadingSkeleton'
@@ -23,6 +24,8 @@ const FILTERS: { value: CollectionItemFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'notebooks', label: 'Notebooks' },
   { value: 'discussions', label: 'Discussions' },
+  { value: 'datasets', label: 'Datasets' },
+  { value: 'competitions', label: 'Competitions' },
 ]
 
 const MEDAL_COLOR: Record<string, string> = {
@@ -70,6 +73,10 @@ export function CollectionsPage(): JSX.Element {
   const [cap, setCap] = useState(50)
   const [modalOpen, setModalOpen] = useState(false)
   const [starting, setStarting] = useState(false)
+
+  // Drill-down drawer: clicking a COMPETITION/DATASET item shows its notebooks
+  // and discussions in-app instead of redirecting to Kaggle.
+  const [drillItem, setDrillItem] = useState<CollectionItem | null>(null)
 
   const loadCollections = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -382,7 +389,27 @@ export function CollectionsPage(): JSX.Element {
                       {item.document_type}
                     </div>
                     <div className="data-table-cell" style={TRUNCATE} title={item.title}>
-                      {item.url ? (
+                      {item.document_type === 'COMPETITION' ||
+                      item.document_type === 'DATASET' ? (
+                        <button
+                          type="button"
+                          onClick={() => setDrillItem(item)}
+                          style={{
+                            ...TRUNCATE,
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            cursor: 'pointer',
+                            color: 'var(--accent-cyan-hover)',
+                            font: 'inherit',
+                            textAlign: 'left',
+                            width: '100%',
+                          }}
+                          title={`Show notebooks & discussions for this ${item.document_type.toLowerCase()}`}
+                        >
+                          {item.title}
+                        </button>
+                      ) : item.url ? (
                         <a
                           href={`https://www.kaggle.com${item.url}`}
                           target="_blank"
@@ -422,6 +449,13 @@ export function CollectionsPage(): JSX.Element {
           )}
         </section>
       )}
+
+      <CollectionItemDrawer
+        open={drillItem !== null}
+        collectionId={selected?.id ?? null}
+        item={drillItem}
+        onClose={() => setDrillItem(null)}
+      />
 
       <ConfirmModal
         open={modalOpen}

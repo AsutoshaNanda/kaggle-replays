@@ -165,7 +165,12 @@ export interface LeaderboardSyncResponse {
 }
 
 // --- Collections ---
-export type CollectionItemFilter = 'all' | 'notebooks' | 'discussions'
+export type CollectionItemFilter =
+  | 'all'
+  | 'notebooks'
+  | 'discussions'
+  | 'datasets'
+  | 'competitions'
 export type Medal = 'gold' | 'silver' | 'bronze'
 
 export interface Collection {
@@ -197,6 +202,18 @@ export interface CollectionItemsResponse {
   items: CollectionItem[]
   total: number
   last_synced_at?: string | null
+}
+// One notebook/discussion surfaced when drilling into a COMPETITION/DATASET item.
+export interface CollectionDrillItem {
+  title: string
+  url: string | null
+  votes: number | null
+  medal: 'gold' | 'silver' | 'bronze' | null
+  author_username: string | null
+}
+export interface CollectionItemContentsResponse {
+  notebooks: CollectionDrillItem[]
+  discussions: CollectionDrillItem[]
 }
 export interface CollectionDownloadResponse {
   job_id: string

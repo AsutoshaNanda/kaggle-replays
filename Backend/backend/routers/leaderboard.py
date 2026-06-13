@@ -62,6 +62,26 @@ async def _owned_competition(db: AsyncSession, user_id: int, competition_id: int
     return comp
 
 
+async def _recently_synced(db: AsyncSession, competition_id: int) -> bool:
+    """True if today's snapshot for this competition was captured very recently.
+
+    Used to debounce rapid "Sync now" clicks so we don't stack background jobs.
+    """
+    today = dt.datetime.now(dt.timezone.utc).date()
+    snap = (
+        await db.execute(
+            select(LeaderboardSnapshot).where(
+                LeaderboardSnapshot.competition_id == competition_id,
+                LeaderboardSnapshot.snapshot_date == today,
+            )
+        )
+    ).scalar_one_or_none()
+    if snap is None or snap.fetched_at is None:
+        return False
+    fetched = snap.fetched_at if snap.fetched_at.tzinfo else snap.fetched_at.replace(tzinfo=dt.timezone.utc)
+    return (dt.datetime.now(dt.timezone.utc) - fetched).total_seconds() < _SYNC_DEBOUNCE_SECONDS
+
+
 async def _top_performers(db: AsyncSession, snapshot_id: int) -> list[TopPerformer]:
     """Build the top-10% performer DTOs (with episode IDs) for a snapshot."""
     entries = (
@@ -187,8 +207,16 @@ async def date_replays(
     )
 
 
+# A non-backfill sync is heavy (leaderboard fetch + paced episode resolution that
+# aborts on Kaggle's own 429), so this app-level cap is generous — it exists only
+# to stop a stuck loop, not to ration legitimate re-syncs (the prior 4/hour blocked
+# real use after a few clicks). Rapid re-clicks are additionally absorbed by the
+# debounce below.
+_SYNC_DEBOUNCE_SECONDS = 90
+
+
 @router.post("/{competition_id}/sync", response_model=LeaderboardSyncResponse)
-@limiter.limit("4/hour")
+@limiter.limit("1/minute")
 async def sync(
     request: Request,
     competition_id: int,
@@ -208,6 +236,14 @@ async def sync(
         )
         mode, message = "backfill", f"Backfill scheduled from {start} to {end}"
     else:
+        # Debounce: if today's snapshot was captured moments ago, skip spawning a
+        # duplicate background job (prevents accidental rapid re-clicks from
+        # stacking work or burning the rate limit).
+        recent = await _recently_synced(db, comp.id)
+        if recent:
+            return LeaderboardSyncResponse(
+                status="skipped", mode="sync", message="Already synced moments ago — refresh to see results."
+            )
         asyncio.create_task(
             leaderboard_worker.run_daily_sync(comp.id, AsyncSessionLocal, manager)
         )

@@ -30,6 +30,29 @@ async def create_job(
     return job
 
 
+async def create_replay_job(
+    db: AsyncSession, user_id: int, episode_ids: list[str], format_mode: str
+) -> DownloadJob:
+    """Insert a queued replay-by-id job (no owned submission) and return it."""
+    ids = [str(e) for e in episode_ids]
+    job = DownloadJob(
+        job_uuid=str(uuid.uuid4()),
+        user_id=user_id,
+        submission_id=None,
+        job_type="episodes",
+        episode_ids=ids,
+        filter_mode="all",
+        format_mode=format_mode,
+        is_bulk=False,
+        status="queued",
+        latest_episode_id=ids[0][:100] if ids else None,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return job
+
+
 async def get_owned_job(db: AsyncSession, user_id: int, job_uuid: str) -> DownloadJob | None:
     """Return a job by UUID only if it belongs to ``user_id``."""
     return (

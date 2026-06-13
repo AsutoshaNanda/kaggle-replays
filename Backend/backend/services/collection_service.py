@@ -23,12 +23,14 @@ from ..models import Collection, CollectionItem, DownloadJob
 _MEDAL_RANK = {"gold": 0, "silver": 1, "bronze": 2}
 
 # Which document types each item_filter selects at the top level. COMPETITION
-# items are only processed under "all" (they fan out into capped notebooks +
-# discussions inside the worker), mirroring the proven CLI behavior.
+# and DATASET items fan out into capped notebooks + discussions inside the worker
+# (and the browse drill-down), mirroring the proven CLI behavior.
 FILTER_DOC_TYPES = {
     "all": None,  # everything
     "notebooks": {"KERNEL"},
     "discussions": {"TOPIC"},
+    "datasets": {"DATASET"},
+    "competitions": {"COMPETITION"},
 }
 
 
@@ -77,6 +79,17 @@ async def list_collections(db: AsyncSession, user_id: int) -> list[Collection]:
             )
         ).scalars()
     )
+
+
+async def get_collection_item(db: AsyncSession, collection_id: int, item_id: int) -> CollectionItem | None:
+    """Return one cached item by PK only if it belongs to ``collection_id``."""
+    return (
+        await db.execute(
+            select(CollectionItem).where(
+                CollectionItem.id == item_id, CollectionItem.collection_id == collection_id
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def list_items(db: AsyncSession, collection_id: int) -> list[CollectionItem]:
@@ -198,6 +211,67 @@ async def create_collection_job(
     await db.commit()
     await db.refresh(job)
     return job
+
+
+# Document types whose contents can be browsed (notebooks + discussions).
+DRILLDOWN_DOC_TYPES = {"COMPETITION", "DATASET"}
+
+
+def _drill_view(parsed: dict) -> dict:
+    """Normalize an enumerated kernel/topic dict into a browse ``DrillItem``."""
+    return {
+        "title": parsed.get("title") or "",
+        "url": parsed.get("url"),
+        "votes": parsed.get("votes"),
+        "medal": parsed.get("medal"),
+        "author_username": parsed.get("author_username"),
+    }
+
+
+async def drilldown_item(page, tokens, item: CollectionItem, cap: int = 30) -> tuple[dict, str | None]:
+    """Enumerate a COMPETITION/DATASET item's top notebooks + discussions for browsing.
+
+    Reuses the proven download-path enumerators in :mod:`kaggle_collections`
+    (vote-ordered, capped). Returns ``({"notebooks": [...], "discussions": [...]},
+    error)``; partial results are returned alongside any upstream error so the
+    UI can still render what it got.
+    """
+    notebooks: list[dict] = []
+    discussions: list[dict] = []
+
+    if item.document_type == "COMPETITION":
+        competition_id = kaggle_collections.trailing_int(item.kaggle_doc_id)
+        if competition_id is None:
+            return {"notebooks": [], "discussions": []}, "Could not resolve the competition id."
+        contents = await kaggle_collections.enumerate_competition_contents(page, tokens, competition_id, cap)
+        notebooks = [_drill_view(k) for k in contents["kernels"]]
+        discussions = [_drill_view(t) for t in contents["topics"]]
+        return {"notebooks": notebooks, "discussions": discussions}, contents["error"]
+
+    if item.document_type == "DATASET":
+        dataset_id = kaggle_collections.trailing_int(item.kaggle_doc_id)
+        error = None
+        if dataset_id is not None:
+            kernels, error = await kaggle_collections.enumerate_dataset_kernels(page, tokens, dataset_id, cap)
+            notebooks = [_drill_view(k) for k in kernels]
+        ref = kaggle_collections.parse_dataset_ref(item.url)
+        if ref is not None and error is None:
+            forum_id, error = await kaggle_collections.fetch_dataset_forum_id(page, tokens, ref[0], ref[1])
+            if forum_id and error is None:
+                topics, error = await kaggle_collections.fetch_dataset_topics(page, tokens, forum_id, cap)
+                discussions = [
+                    {
+                        "title": t.get("title") or "",
+                        "url": f"/discussions/{t['topic_id']}",
+                        "votes": None,
+                        "medal": None,
+                        "author_username": None,
+                    }
+                    for t in topics
+                ]
+        return {"notebooks": notebooks, "discussions": discussions}, error
+
+    return {"notebooks": [], "discussions": []}, "This item type has no notebooks or discussions."
 
 
 def item_view(item: CollectionItem) -> dict:

@@ -203,12 +203,6 @@ async def _pull_kernel(url: str | None, dest, cli) -> bool:
     return await _run_cli(cli, "kernels", "pull", f"{ref[0]}/{ref[1]}", "-p", str(dest))
 
 
-def _trailing_int(value: str | None) -> int | None:
-    """Extract the trailing numeric id from a doc id like ``dataset-1866141``."""
-    match = re.search(r"(\d+)$", value or "")
-    return int(match.group(1)) if match else None
-
-
 async def _save_topic(page, tokens, url: str | None, kaggle_doc_id: str, dest) -> bool:
     """Fetch one discussion thread (by URL/doc id) and write it as Markdown."""
     topic_id = kc.topic_id_from_doc(url, kaggle_doc_id)
@@ -239,7 +233,7 @@ async def _drill_dataset(page, tokens, job: DownloadJob, item: CollectionItem, d
     propagates as :class:`_RateLimited` to abort the job.
     """
     base = ensure_dir(dest / _safe_name(item.title, item.kaggle_doc_id))
-    ref = _parse_dataset_ref(item.url)
+    ref = kc.parse_dataset_ref(item.url)
     cap = _cap(job)
     medals = _medal_set(job)
     any_ok = False
@@ -250,7 +244,7 @@ async def _drill_dataset(page, tokens, job: DownloadJob, item: CollectionItem, d
             any_ok = True
 
     # 2) The dataset's own notebooks (ListKernels by numeric datasetId).
-    dataset_id = _trailing_int(item.kaggle_doc_id)
+    dataset_id = kc.trailing_int(item.kaggle_doc_id)
     if dataset_id is not None:
         kernels, error = await kc.enumerate_dataset_kernels(page, tokens, dataset_id, cap)
         _raise_if_rate_limited(error)
@@ -282,7 +276,7 @@ async def _drill_competition(page, tokens, job: DownloadJob, item: CollectionIte
     Success means the enumeration worked and at least one sub-item saved (or the
     competition genuinely has none); sub-item failures are logged, not fatal.
     """
-    competition_id = _trailing_int(item.kaggle_doc_id)
+    competition_id = kc.trailing_int(item.kaggle_doc_id)
     if competition_id is None:
         return False
     cap = _cap(job)
@@ -326,17 +320,6 @@ async def _run_cli(*argv: str) -> bool:
     if proc.returncode != 0:
         _log.warning("kaggle_cli.failed", argv=argv[1:3], stderr=(stderr or b"")[:300].decode(errors="replace"))
     return proc.returncode == 0
-
-
-def _parse_dataset_ref(url: str | None) -> tuple[str, str] | None:
-    """Parse ``/datasets/owner/slug`` into a CLI-safe ``(owner, slug)``."""
-    parts = (url or "").strip("/").split("/")
-    if len(parts) < 3 or parts[0] != "datasets":
-        return None
-    owner, slug = parts[1], parts[2]
-    if not (kc._REF_SEGMENT_RE.match(owner) and kc._REF_SEGMENT_RE.match(slug)):  # noqa: SLF001
-        return None
-    return owner, slug
 
 
 def _safe_name(text: str, fallback: str) -> str:
