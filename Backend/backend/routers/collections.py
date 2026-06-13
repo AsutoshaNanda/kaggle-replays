@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import write_audit
 from ..dependencies import get_current_user, get_db, limiter
-from ..kaggle_service import open_page
+from ..kaggle_service import get_api_session
 from ..models import User
 from ..schemas import (
     CollectionDownloadRequest,
@@ -25,7 +25,6 @@ from ..schemas import (
     CollectionListResponse,
 )
 from ..services import collection_service
-from ..session_manager import get_session_manager
 from ..tasks.collection_worker import run_collection_job
 
 router = APIRouter(prefix="/collections", tags=["collections"])
@@ -53,13 +52,8 @@ async def sync_collections(
     db: AsyncSession = Depends(get_db),
 ) -> CollectionListResponse:
     """Refresh the collection list from Kaggle."""
-    manager = get_session_manager()
-    context = await manager.get_context(current_user.id)
-    page, tokens = await open_page(context)
-    try:
-        rows, error = await collection_service.sync_collections(db, current_user.id, page, tokens)
-    finally:
-        await page.close()
+    page, tokens = await get_api_session(current_user.id)
+    rows, error = await collection_service.sync_collections(db, current_user.id, page, tokens)
     if error is not None:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=error)
     await write_audit(
@@ -72,10 +66,16 @@ async def sync_collections(
     )
 
 
+def _parse_medals(raw: str) -> set[str]:
+    """Parse a ``?medals=gold,silver`` CSV into a validated medal set."""
+    return {m.strip().lower() for m in raw.split(",") if m.strip().lower() in ("gold", "silver", "bronze")}
+
+
 @router.get("/{collection_id}/items", response_model=CollectionItemsResponse)
 async def get_collection_items(
     collection_id: int,
     item_filter: str = Query("all", pattern="^(all|notebooks|discussions)$"),
+    medals: str = Query("", description="CSV subset of gold,silver,bronze (notebooks only)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CollectionItemsResponse:
@@ -84,7 +84,7 @@ async def get_collection_items(
     if collection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
     items = await collection_service.list_items(db, collection.id)
-    selected = collection_service.select_items(items, item_filter)
+    selected = collection_service.select_items(items, item_filter, _parse_medals(medals))
     return CollectionItemsResponse(
         items=[CollectionItemSchema.model_validate(collection_service.item_view(i)) for i in selected],
         total=len(selected),
@@ -104,13 +104,8 @@ async def sync_collection_items(
     collection = await collection_service.get_owned_collection(db, current_user.id, collection_id)
     if collection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
-    manager = get_session_manager()
-    context = await manager.get_context(current_user.id)
-    page, tokens = await open_page(context)
-    try:
-        items, error = await collection_service.sync_collection_items(db, collection, page, tokens)
-    finally:
-        await page.close()
+    page, tokens = await get_api_session(current_user.id)
+    items, error = await collection_service.sync_collection_items(db, collection, page, tokens)
     if error is not None:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=error)
     await write_audit(
@@ -143,14 +138,16 @@ async def download_collection(
     if collection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
     items = await collection_service.list_items(db, collection.id)
-    selected = collection_service.select_items(items, body.item_filter)
+    medals = {m.lower() for m in body.medals}
+    selected = collection_service.select_items(items, body.item_filter, medals)
     if not selected:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No matching items — sync the collection first or change the filter",
         )
     job = await collection_service.create_collection_job(
-        db, current_user.id, collection.id, body.item_filter, body.format_mode, body.per_competition_cap
+        db, current_user.id, collection.id, body.item_filter, body.format_mode,
+        body.per_competition_cap, medals,
     )
     asyncio.create_task(run_collection_job(job.job_uuid))
     await write_audit(

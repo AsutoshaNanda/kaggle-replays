@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 # Make the project-root downloader.py importable without copying its code.
@@ -21,35 +22,76 @@ if str(_ROOT) not in sys.path:
 
 import downloader  # noqa: E402  (intentional post-path-insert import)
 
+from .session_manager import get_session_manager  # noqa: E402
 from .utils.cache import episode_cache  # noqa: E402
+from .utils.throttle import kaggle_throttle  # noqa: E402
+
+# XSRF + build-hash are stable for a session, so tokens are cached this long and
+# reused across calls instead of re-read (with a blind 3s wait) every operation.
+_TOKEN_TTL = 2700.0  # 45 minutes
+_token_cache: dict[int, dict] = {}
 
 
 async def open_page(context):
     """Open an authenticated Kaggle page and return ``(page, tokens)``.
 
-    Navigates to the competitions URL (as the original scripts do) and reads the
-    XSRF / build-hash cookies via :func:`downloader.get_auth_tokens`.
-
-    Args:
-        context: A Playwright ``BrowserContext`` from the session manager.
-
-    Returns:
-        ``(page, tokens)`` where ``tokens`` is ``{"xsrf", "build_hash"}``.
+    Legacy direct-context helper (still navigates + reads tokens). Prefer
+    :func:`get_api_session`, which reuses one persistent page + cached tokens per
+    user and is what every internal caller now uses.
     """
     page = await context.new_page()
     await page.goto(downloader.KAGGLE_COMPETITIONS_URL)
-    await page.wait_for_timeout(3000)
-    tokens = await downloader.get_auth_tokens(page)
+    tokens = await _read_tokens(page)
     return page, tokens
+
+
+async def _read_tokens(page) -> dict:
+    """Read XSRF + build-hash cookies, polling briefly until both appear.
+
+    Replaces the old blind ``wait_for_timeout(3000)``: returns as soon as the
+    cookies exist (usually well under a second), capped at ~2s.
+    """
+    tokens = {"xsrf": None, "build_hash": None}
+    for _ in range(20):
+        tokens = await downloader.get_auth_tokens(page)
+        if tokens.get("xsrf") and tokens.get("build_hash"):
+            return tokens
+        await asyncio.sleep(0.1)
+    return tokens
+
+
+async def get_api_session(user_id: int):
+    """Return ``(page, tokens)`` for ``user_id``, reusing a persistent page + cached tokens.
+
+    The page is the long-lived per-user page from the session manager and the
+    tokens are cached for :data:`_TOKEN_TTL`. This removes the per-operation
+    new-page + navigate + 3s wait + token re-read that previously ran on every
+    sync/download (a "Sync now" used to do it three times over).
+    """
+    page = await get_session_manager().get_page(user_id)
+    now = time.monotonic()
+    entry = _token_cache.get(user_id)
+    if entry is None or now - entry["ts"] > _TOKEN_TTL or not entry["tokens"].get("xsrf"):
+        tokens = await _read_tokens(page)
+        entry = {"tokens": tokens, "ts": now}
+        _token_cache[user_id] = entry
+    return page, entry["tokens"]
+
+
+def invalidate_api_session(user_id: int) -> None:
+    """Drop a user's cached tokens (call after a 401 / re-login)."""
+    _token_cache.pop(user_id, None)
 
 
 async def list_competitions(page, tokens) -> dict:
     """Return the raw ListCompetitions response (competitions + userTeams)."""
+    await kaggle_throttle.acquire()
     return await downloader.fetch_competitions(page, tokens)
 
 
 async def list_submissions(page, tokens, team_id: str) -> list[dict]:
     """Return submissions for a team."""
+    await kaggle_throttle.acquire()
     return await downloader.fetch_submissions(page, tokens, team_id)
 
 
@@ -70,6 +112,7 @@ async def list_episodes_checked(page, tokens, submission_id: str) -> tuple[list[
         submission), or ``([], message)`` when the API returned a non-200 such as
         ``429 RESOURCE_EXHAUSTED`` or the session looks expired.
     """
+    await kaggle_throttle.acquire()
     try:
         resp = await page.evaluate(
             """
@@ -95,6 +138,7 @@ async def list_episodes_checked(page, tokens, submission_id: str) -> tuple[list[
         return [], f"Episode lookup failed: {exc}"
 
     status = resp.get("status") if isinstance(resp, dict) else 0
+    kaggle_throttle.record(status)
     if status != 200:
         if status == 429:
             return [], "Kaggle is rate-limiting requests (429). Please wait a minute and retry."
@@ -119,6 +163,7 @@ async def _fetch_one_episode_count(page, tokens, submission_id: str) -> int:
     A single ``ListEpisodes`` call. ``-1`` is the "unknown" sentinel (distinct
     from a genuine ``0``), notably for Kaggle ``429 RESOURCE_EXHAUSTED``.
     """
+    await kaggle_throttle.acquire()
     try:
         resp = await page.evaluate(
             """
@@ -143,6 +188,7 @@ async def _fetch_one_episode_count(page, tokens, submission_id: str) -> int:
         )
     except Exception:  # noqa: BLE001
         return -1
+    kaggle_throttle.record(resp.get("status") if isinstance(resp, dict) else None)
     if not isinstance(resp, dict) or resp.get("status") != 200 or not resp.get("text"):
         return -1
     try:
@@ -343,8 +389,9 @@ async def fetch_leaderboard(page, tokens, competition_id) -> dict:
     Returns:
         ``{"status": int, "text": str}`` (raw), or ``{}`` on error.
     """
+    await kaggle_throttle.acquire()
     try:
-        return await page.evaluate(
+        resp = await page.evaluate(
             """
         async ({xsrf, buildHash, competitionId}) => {
             const r = await fetch(
@@ -369,3 +416,5 @@ async def fetch_leaderboard(page, tokens, competition_id) -> dict:
         )
     except Exception:  # noqa: BLE001
         return {}
+    kaggle_throttle.record(resp.get("status") if isinstance(resp, dict) else None)
+    return resp

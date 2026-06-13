@@ -17,7 +17,7 @@ import { LoadingSkeleton } from '@/components/shared/LoadingSkeleton'
 import { MedalIcon } from '@/components/shared/icons'
 import { useToast } from '@/components/shared/ToastProvider'
 import { useDownloadStore } from '@/store/downloadStore'
-import type { Collection, CollectionItem, CollectionItemFilter } from '@/types'
+import type { Collection, CollectionItem, CollectionItemFilter, Medal } from '@/types'
 
 const FILTERS: { value: CollectionItemFilter; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -30,6 +30,8 @@ const MEDAL_COLOR: Record<string, string> = {
   silver: '#9ea7b3',
   bronze: '#b08d57',
 }
+
+const MEDALS: Medal[] = ['gold', 'silver', 'bronze']
 
 // 6 columns: Medal | Type | Title | Author | Votes | Comments
 const GRID = '60px 110px minmax(220px, 2fr) minmax(140px, 1fr) 70px 90px'
@@ -63,6 +65,7 @@ export function CollectionsPage(): JSX.Element {
   const [loadingItems, setLoadingItems] = useState(false)
   const [syncingItems, setSyncingItems] = useState(false)
   const [filter, setFilter] = useState<CollectionItemFilter>('all')
+  const [medals, setMedals] = useState<Medal[]>([])
 
   const [cap, setCap] = useState(50)
   const [modalOpen, setModalOpen] = useState(false)
@@ -86,10 +89,14 @@ export function CollectionsPage(): JSX.Element {
   }, [loadCollections])
 
   const loadItems = useCallback(
-    async (collection: Collection, itemFilter: CollectionItemFilter): Promise<void> => {
+    async (
+      collection: Collection,
+      itemFilter: CollectionItemFilter,
+      medalSel: Medal[],
+    ): Promise<void> => {
       setLoadingItems(true)
       try {
-        const res = await getCollectionItems(collection.id, itemFilter)
+        const res = await getCollectionItems(collection.id, itemFilter, medalSel)
         setItems(res.items)
         setItemsSyncedAt(res.last_synced_at ?? null)
       } catch {
@@ -104,12 +111,21 @@ export function CollectionsPage(): JSX.Element {
   const handleSelect = (collection: Collection): void => {
     setSelected(collection)
     setFilter('all')
-    void loadItems(collection, 'all')
+    setMedals([])
+    void loadItems(collection, 'all', [])
   }
 
   const handleFilter = (value: CollectionItemFilter): void => {
     setFilter(value)
-    if (selected) void loadItems(selected, value)
+    if (selected) void loadItems(selected, value, medals)
+  }
+
+  const toggleMedal = (medal: Medal): void => {
+    const next = medals.includes(medal)
+      ? medals.filter((m) => m !== medal)
+      : [...medals, medal]
+    setMedals(next)
+    if (selected) void loadItems(selected, filter, next)
   }
 
   const handleSyncCollections = async (): Promise<void> => {
@@ -131,6 +147,7 @@ export function CollectionsPage(): JSX.Element {
     try {
       const res = await syncCollectionItems(selected.id)
       setFilter('all')
+      setMedals([])
       setItems(res.items)
       setItemsSyncedAt(res.last_synced_at ?? null)
       notify('success', `Synced ${res.total} items.`)
@@ -145,7 +162,7 @@ export function CollectionsPage(): JSX.Element {
     if (!selected) return
     setStarting(true)
     try {
-      const res = await startCollectionDownload(selected.id, filter, cap)
+      const res = await startCollectionDownload(selected.id, filter, cap, medals)
       setActiveJobId(res.job_id)
       notify('success', `Download started (${res.total_items} items).`)
       setModalOpen(false)
@@ -259,6 +276,35 @@ export function CollectionsPage(): JSX.Element {
                   {f.label}
                 </button>
               ))}
+            </div>
+            {/* Medal filter — applies to notebooks only. */}
+            <div className="flex gap-1" title="Filter notebooks by medal">
+              {MEDALS.map((m) => {
+                const active = medals.includes(m)
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    className="btn-ghost"
+                    aria-pressed={active}
+                    onClick={() => toggleMedal(m)}
+                    style={{
+                      padding: '6px 10px',
+                      fontSize: '0.8rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      textTransform: 'capitalize',
+                      color: active ? MEDAL_COLOR[m] : 'var(--text-muted)',
+                      border: `1px solid ${active ? MEDAL_COLOR[m] : 'var(--border-subtle)'}`,
+                      background: active ? 'var(--bg-raised)' : 'transparent',
+                    }}
+                  >
+                    <MedalIcon size={14} />
+                    {m}
+                  </button>
+                )
+              })}
             </div>
             <button
               type="button"

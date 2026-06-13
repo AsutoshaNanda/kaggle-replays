@@ -35,9 +35,18 @@ import asyncio
 import json
 import re
 
+from .utils.throttle import kaggle_throttle
+
 LIST_COLLECTIONS = "/api/i/users.CollectionsService/ListCollections"
 LIST_SEARCH_CONTENT = "/api/i/search.SearchContentService/ListSearchContent"
 GET_FORUM_TOPIC = "/api/i/discussions.DiscussionsService/GetForumTopicById"
+# Dataset drill-down (probe-verified 2026-06-13): a DATASET item's own notebooks
+# come from ``ListKernels`` filtered by ``datasetId``; its discussions need the
+# dataset's ``forumId`` (from ``GetDatasetBasics`` — NOT the non-existent
+# ``GetDatasetView`` the CLI prototype guessed) fed into ``GetTopicListByForumId``.
+LIST_KERNELS = "/api/i/kernels.KernelsService/ListKernels"
+GET_DATASET_BASICS = "/api/i/datasets.DatasetDetailService/GetDatasetBasics"
+GET_TOPIC_LIST = "/api/i/discussions.DiscussionsService/GetTopicListByForumId"
 
 ORDER_BY_DATE_UPDATED = "LIST_SEARCH_CONTENT_ORDER_BY_DATE_UPDATED"
 ORDER_BY_VOTES = "LIST_SEARCH_CONTENT_ORDER_BY_VOTES"
@@ -64,9 +73,13 @@ async def _post_internal(page, tokens, path: str, payload: dict) -> dict:
 
     Returns:
         ``{"status": int, "text": str}``; ``{"status": 0}`` on evaluate failure.
+
+    Every call is paced through the shared :data:`kaggle_throttle` so collection
+    and dataset drill-downs never burst Kaggle's private API.
     """
+    await kaggle_throttle.acquire()
     try:
-        return await page.evaluate(
+        resp = await page.evaluate(
             """
         async ({xsrf, buildHash, path, payload}) => {
             const r = await fetch(path, {
@@ -90,6 +103,8 @@ async def _post_internal(page, tokens, path: str, payload: dict) -> dict:
         )
     except Exception:  # noqa: BLE001
         return {"status": 0, "text": ""}
+    kaggle_throttle.record(resp.get("status") if isinstance(resp, dict) else None)
+    return resp
 
 
 def _check(resp: dict, what: str) -> tuple[dict | None, str | None]:
@@ -265,6 +280,169 @@ async def enumerate_competition_contents(
             break
         await asyncio.sleep(delay_seconds)
     return out
+
+
+def _parse_kernel(kernel: dict) -> dict:
+    """Normalize one ``ListKernels`` row to the same shape :func:`parse_item` yields.
+
+    ``ListKernels`` returns ``author.userName`` + ``currentUrlSlug`` (not a URL),
+    ``totalVotes`` and a top-level ``medal`` ("GOLD"/"SILVER"/"BRONZE") — probe
+    confirmed. A synthetic ``/code/owner/slug`` URL lets the worker reuse
+    :func:`parse_kernel_ref` / ``_pull_kernel`` unchanged.
+    """
+    owner = (kernel.get("author") or {}).get("userName") or ""
+    slug = kernel.get("currentUrlSlug") or ""
+    return {
+        "kaggle_doc_id": str(kernel.get("id") or ""),
+        "document_type": "KERNEL",
+        "title": str(kernel.get("title") or "")[:500],
+        "votes": int(kernel.get("totalVotes") or 0),
+        "medal": normalize_medal(kernel.get("medal")),
+        "url": f"/code/{owner}/{slug}" if owner and slug else None,
+    }
+
+
+async def enumerate_dataset_kernels(
+    page,
+    tokens,
+    dataset_id: int,
+    cap: int,
+    page_size: int = 20,
+    max_pages: int = 50,
+    delay_seconds: float = 1.0,
+) -> tuple[list[dict], str | None]:
+    """Return ``(kernels, error)`` for a DATASET's notebooks, votes-desc, capped.
+
+    ``ListKernels`` exposes only a HOTNESS sort for a ``datasetId`` filter (no
+    server-side vote order), but each row carries ``totalVotes``, so we page
+    under HOTNESS until ``cap`` candidates are gathered, then sort by votes
+    descending and trim — a true "top-N by votes" without over-fetching.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for page_no in range(1, max_pages + 1):
+        payload = {
+            "kernelFilterCriteria": {
+                "search": "",
+                "listRequest": {
+                    "sortBy": "HOTNESS",
+                    "pageSize": page_size,
+                    "group": "EVERYONE",
+                    "page": page_no,
+                    "datasetId": int(dataset_id),
+                    "modelIds": [],
+                    "modelInstanceIds": [],
+                    "excludeKernelIds": [],
+                    "tagIds": "",
+                    "excludeResultsFilesOutputs": False,
+                    "wantOutputFiles": False,
+                },
+            },
+            "detailFilterCriteria": {
+                "deletedAccessBehavior": "RETURN_NOTHING",
+                "unauthorizedAccessBehavior": "RETURN_NOTHING",
+                "excludeResultsFilesOutputs": False,
+                "wantOutputFiles": False,
+                "kernelIds": [],
+                "outputFileTypes": [],
+                "includeInvalidDataSources": False,
+            },
+            "readMask": "pinnedKernels",
+        }
+        resp = await _post_internal(page, tokens, LIST_KERNELS, payload)
+        data, error = _check(resp, "listing dataset notebooks")
+        if error is not None:
+            return _sorted_capped(out, cap), error
+        batch = data.get("kernels", [])
+        if not batch:
+            break
+        for kernel in batch:
+            parsed = _parse_kernel(kernel)
+            if not parsed["url"] or parsed["kaggle_doc_id"] in seen:
+                continue
+            seen.add(parsed["kaggle_doc_id"])
+            out.append(parsed)
+        # Enough candidates gathered to satisfy the cap after the votes sort.
+        if cap and len(out) >= cap:
+            break
+        if len(batch) < page_size:
+            break
+        await asyncio.sleep(delay_seconds)
+    return _sorted_capped(out, cap), None
+
+
+def _sorted_capped(items: list[dict], cap: int) -> list[dict]:
+    """Sort parsed kernels by votes descending and apply ``cap`` (0 = no cap)."""
+    items.sort(key=lambda d: -int(d.get("votes") or 0))
+    return items[:cap] if cap else items
+
+
+async def fetch_dataset_forum_id(page, tokens, owner: str, slug: str) -> tuple[int | None, str | None]:
+    """Return ``(forum_id, error)`` for a dataset via ``GetDatasetBasics``.
+
+    ``forumId`` is a top-level field of the basics payload (probe-verified) and is
+    distinct from the dataset's own ``datasetId``.
+    """
+    resp = await _post_internal(page, tokens, GET_DATASET_BASICS, {"ownerSlug": owner, "datasetSlug": slug})
+    data, error = _check(resp, "fetching dataset basics")
+    if error is not None:
+        return None, error
+    forum_id = data.get("forumId")
+    if not forum_id:
+        return None, None
+    try:
+        return int(forum_id), None
+    except (TypeError, ValueError):
+        return None, None
+
+
+async def fetch_dataset_topics(
+    page,
+    tokens,
+    forum_id: int,
+    cap: int,
+    max_pages: int = 50,
+    delay_seconds: float = 1.0,
+) -> tuple[list[dict], str | None]:
+    """Return ``(topics, error)`` for a dataset forum via ``GetTopicListByForumId``.
+
+    The list endpoint only accepts ``TOPIC_LIST_SORT_BY_HOT`` (other sorts 400)
+    and carries no per-topic vote count, so topics are taken in HOT order and
+    capped. Each ``id`` is the ``forumTopicId`` for :func:`fetch_forum_topic`.
+    """
+    out: list[dict] = []
+    seen: set[int] = set()
+    for page_no in range(1, max_pages + 1):
+        payload = {
+            "category": "TOPIC_LIST_CATEGORY_ALL",
+            "group": "TOPIC_LIST_GROUP_ALL",
+            "customGroupingIds": [],
+            "author": "TOPIC_LIST_AUTHOR_UNSPECIFIED",
+            "myActivity": "TOPIC_LIST_MY_ACTIVITY_UNSPECIFIED",
+            "recency": "TOPIC_LIST_RECENCY_UNSPECIFIED",
+            "filterCategoryIds": [],
+            "searchQuery": "",
+            "sortBy": "TOPIC_LIST_SORT_BY_HOT",
+            "page": page_no,
+            "forumId": int(forum_id),
+        }
+        resp = await _post_internal(page, tokens, GET_TOPIC_LIST, payload)
+        data, error = _check(resp, "listing dataset discussions")
+        if error is not None:
+            return out, error
+        batch = data.get("topics", [])
+        if not batch:
+            break
+        for topic in batch:
+            tid = topic.get("id")
+            if tid is None or tid in seen:
+                continue
+            seen.add(tid)
+            out.append({"topic_id": int(tid), "title": str(topic.get("title") or "")})
+            if cap and len(out) >= cap:
+                return out, None
+        await asyncio.sleep(delay_seconds)
+    return out, None
 
 
 async def fetch_forum_topic(page, tokens, forum_topic_id: int) -> tuple[dict | None, str | None]:

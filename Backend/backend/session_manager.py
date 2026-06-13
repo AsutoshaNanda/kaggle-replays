@@ -12,13 +12,17 @@ import asyncio
 from collections import OrderedDict
 from pathlib import Path
 
-from playwright.async_api import Browser, BrowserContext, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from .config import get_settings
 from .logging_config import get_logger
 
 _settings = get_settings()
 _log = get_logger("backend.session_manager")
+
+# A persistent API page is parked on this origin so its same-origin
+# ``fetch`` calls (page.evaluate) carry the user's Kaggle cookies.
+KAGGLE_ORIGIN_URL = "https://www.kaggle.com/competitions"
 
 
 class PlaywrightSessionManager:
@@ -30,6 +34,9 @@ class PlaywrightSessionManager:
         self._playwright = None
         self._browser: Browser | None = None
         self._contexts: "OrderedDict[int, BrowserContext]" = OrderedDict()
+        # One long-lived API page per user, reused across calls so we don't open
+        # a fresh page + re-navigate Kaggle on every operation.
+        self._pages: dict[int, Page] = {}
         self._lock = asyncio.Lock()
         self._max = _settings.MAX_CONCURRENT_CONTEXTS
 
@@ -87,14 +94,40 @@ class PlaywrightSessionManager:
 
             while len(self._contexts) > self._max:
                 old_id, old_ctx = self._contexts.popitem(last=False)
+                self._pages.pop(old_id, None)  # closed with its context below
                 await old_ctx.close()
                 _log.info("session.context_evicted", user_id=old_id)
 
             return context
 
-    async def invalidate_context(self, user_id: int) -> None:
-        """Close and remove a user's cached context, if present."""
+    async def get_page(self, user_id: int) -> Page:
+        """Return a persistent API page for ``user_id`` (created + navigated once).
+
+        Reused across all Kaggle calls so we no longer open a new page and
+        re-navigate kaggle.com on every operation — the single biggest cut in the
+        project's Kaggle request volume. Re-created transparently if the previous
+        page was closed (e.g. its context was evicted).
+        """
+        context = await self.get_context(user_id)
+        created = False
         async with self._lock:
+            page = self._pages.get(user_id)
+            if page is None or page.is_closed():
+                page = await context.new_page()
+                self._pages[user_id] = page
+                created = True
+        if created:
+            try:
+                await page.goto(KAGGLE_ORIGIN_URL)
+            except Exception:  # noqa: BLE001 — token read will surface a clear error
+                _log.warning("session.page_nav_failed", user_id=user_id)
+            _log.info("session.page_created", user_id=user_id)
+        return page
+
+    async def invalidate_context(self, user_id: int) -> None:
+        """Close and remove a user's cached context + page, if present."""
+        async with self._lock:
+            self._pages.pop(user_id, None)  # closed with its context below
             ctx = self._contexts.pop(user_id, None)
             if ctx is not None:
                 await ctx.close()
@@ -103,6 +136,7 @@ class PlaywrightSessionManager:
     async def close_all(self) -> None:
         """Close all contexts and the browser (call from app shutdown)."""
         async with self._lock:
+            self._pages.clear()  # pages close with their contexts below
             for ctx in self._contexts.values():
                 await ctx.close()
             self._contexts.clear()

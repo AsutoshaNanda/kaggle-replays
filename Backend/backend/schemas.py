@@ -18,6 +18,7 @@ FormatMode = Literal["json", "zip", "both"]
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 JobType = Literal["episodes", "collection"]
 CollectionItemFilter = Literal["all", "notebooks", "discussions"]
+Medal = Literal["gold", "silver", "bronze"]
 
 
 class _StrictModel(BaseModel):
@@ -183,8 +184,10 @@ class CollectionDownloadRequest(_StrictModel):
 
     item_filter: CollectionItemFilter = "all"
     format_mode: FormatMode = "zip"
-    # Top-N notebooks AND top-N discussions per COMPETITION item (0 = no cap).
+    # Top-N notebooks AND top-N discussions per COMPETITION/DATASET item (0 = no cap).
     per_competition_cap: int = Field(default=50, ge=0, le=1000)
+    # Restrict downloaded notebooks to these medals; empty = all notebooks.
+    medals: list[Medal] = Field(default_factory=list)
     confirm: bool = False
 
 

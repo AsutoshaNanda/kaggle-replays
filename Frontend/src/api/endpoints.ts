@@ -8,6 +8,7 @@ import type {
   CollectionItemFilter,
   CollectionItemsResponse,
   CollectionListResponse,
+  Medal,
   CompetitionListResponse,
   DownloadHistoryResponse,
   DownloadJob,
@@ -191,10 +192,11 @@ export async function syncCollections(): Promise<CollectionListResponse> {
 export async function getCollectionItems(
   collectionId: number,
   itemFilter: CollectionItemFilter,
+  medals: Medal[] = [],
 ): Promise<CollectionItemsResponse> {
   const { data } = await apiClient.get<CollectionItemsResponse>(
     `/collections/${collectionId}/items`,
-    { params: { item_filter: itemFilter } },
+    { params: { item_filter: itemFilter, medals: medals.join(',') } },
   )
   return data
 }
@@ -213,6 +215,7 @@ export async function startCollectionDownload(
   collectionId: number,
   itemFilter: CollectionItemFilter,
   perCompetitionCap: number,
+  medals: Medal[] = [],
 ): Promise<CollectionDownloadResponse> {
   const { data } = await apiClient.post<CollectionDownloadResponse>(
     `/collections/${collectionId}/download`,
@@ -220,6 +223,7 @@ export async function startCollectionDownload(
       item_filter: itemFilter,
       format_mode: 'zip',
       per_competition_cap: perCompetitionCap,
+      medals,
       confirm: true,
     },
   )

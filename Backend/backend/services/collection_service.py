@@ -37,10 +37,25 @@ def item_sort_key(item: CollectionItem) -> tuple[int, int]:
     return (_MEDAL_RANK.get(item.medal or "", 3), -(item.votes or 0))
 
 
-def select_items(items: list[CollectionItem], item_filter: str) -> list[CollectionItem]:
-    """Return the items a job/list view includes for ``item_filter``, sorted."""
+def select_items(
+    items: list[CollectionItem], item_filter: str, medals: set[str] | None = None
+) -> list[CollectionItem]:
+    """Return the items a job/list view includes, filtered + sorted.
+
+    ``item_filter`` keeps only the matching document types; ``medals`` (a subset
+    of gold/silver/bronze, empty/None = all) further restricts NOTEBOOK items to
+    those medals — discussions/competitions/datasets are never medal-filtered.
+    Result is medal→votes sorted.
+    """
     allowed = FILTER_DOC_TYPES.get(item_filter)
-    picked = [i for i in items if allowed is None or i.document_type in allowed]
+    medals = medals or set()
+    picked = []
+    for i in items:
+        if allowed is not None and i.document_type not in allowed:
+            continue
+        if medals and i.document_type == "KERNEL" and (i.medal or "") not in medals:
+            continue
+        picked.append(i)
     return sorted(picked, key=item_sort_key)
 
 
@@ -162,6 +177,7 @@ async def create_collection_job(
     item_filter: str,
     format_mode: str,
     per_competition_cap: int,
+    medals: set[str] | None = None,
 ) -> DownloadJob:
     """Insert a queued collection-type ``download_jobs`` row and return it."""
     job = DownloadJob(
@@ -172,6 +188,7 @@ async def create_collection_job(
         collection_id=collection_id,
         item_filter=item_filter,
         per_competition_cap=per_competition_cap,
+        medal_filter=",".join(sorted(medals)) if medals else None,
         filter_mode="all",  # episode-only column; collection jobs store the default
         format_mode=format_mode,
         is_bulk=False,

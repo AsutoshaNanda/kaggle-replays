@@ -220,6 +220,9 @@ class DownloadJob(Base):
     # Collection jobs only: top-N notebooks/discussions per COMPETITION item
     # (NULL = server default, 0 = no cap).
     per_competition_cap: Mapped[int | None] = mapped_column(UINT, nullable=True)
+    # Collection jobs only: comma-joined medals ("gold,silver") to restrict
+    # downloaded notebooks; NULL = no medal filter (all notebooks).
+    medal_filter: Mapped[str | None] = mapped_column(String(40), nullable=True)
     filter_mode: Mapped[str] = mapped_column(
         Enum("all", "win", "lose", "draw", name="filter_mode_enum"), nullable=False, default="all"
     )
