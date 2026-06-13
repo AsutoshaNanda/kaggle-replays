@@ -15,7 +15,7 @@ import math
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..kaggle_service import fetch_leaderboard, list_episodes_checked, open_page
+from ..kaggle_service import fetch_leaderboard, get_api_session, list_episodes_checked
 from ..logging_config import get_logger
 from ..models import (
     Competition,
@@ -198,17 +198,15 @@ async def run_daily_sync(competition_id: int, db_factory, session_manager) -> No
         comp = (await db.execute(select(Competition).where(Competition.id == competition_id))).scalar_one_or_none()
         if comp is None:
             return
-        context = await session_manager.get_context(comp.user_id)
-        page, tokens = await open_page(context)
-        try:
-            entries = await fetch_leaderboard_entries(page, tokens, comp.kaggle_id)
-            if not entries:
-                _log.warning("leaderboard.empty", competition_id=competition_id)
-                return
-            snapshot = await store_snapshot(db, competition_id, today, entries)
-            await resolve_top_episodes(page, tokens, db, snapshot.id)
-        finally:
-            await page.close()
+        # Shared persistent page (session_manager param kept for signature
+        # compatibility; get_api_session uses the same singleton internally).
+        page, tokens = await get_api_session(comp.user_id)
+        entries = await fetch_leaderboard_entries(page, tokens, comp.kaggle_id)
+        if not entries:
+            _log.warning("leaderboard.empty", competition_id=competition_id)
+            return
+        snapshot = await store_snapshot(db, competition_id, today, entries)
+        await resolve_top_episodes(page, tokens, db, snapshot.id)
 
 
 async def backfill(competition_id: int, start_date: dt.date, end_date: dt.date, db_factory, session_manager) -> None:

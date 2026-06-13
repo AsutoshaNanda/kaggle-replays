@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..kaggle_service import (
     fetch_submission_episode_data,
+    get_api_session,
     list_competitions,
     list_submissions,
-    open_page,
 )
 
 
@@ -29,7 +29,6 @@ class UpstreamRateLimited(Exception):
         self.message = message
         self.retry_after = retry_after
 from ..models import Competition, Submission
-from ..session_manager import get_session_manager
 
 _CACHE_TTL = dt.timedelta(minutes=5)
 # Submissions + episode lists are served from the DB cache for this long before a
@@ -44,12 +43,8 @@ async def sync_competitions(db: AsyncSession, user_id: int) -> list[Competition]
     Returns:
         The user's cached :class:`Competition` rows after upsert.
     """
-    context = await get_session_manager().get_context(user_id)
-    page, tokens = await open_page(context)
-    try:
-        data = await list_competitions(page, tokens)
-    finally:
-        await page.close()
+    page, tokens = await get_api_session(user_id)
+    data = await list_competitions(page, tokens)
 
     teams = {t["competitionId"]: t for t in data.get("userTeams", [])}
     for comp in data.get("competitions", []):
@@ -151,12 +146,8 @@ async def sync_submissions(
         if newest and dt.datetime.now(dt.timezone.utc) - _aware(newest) < _DATA_TTL:
             return rows
 
-    context = await get_session_manager().get_context(user_id)
-    page, tokens = await open_page(context)
-    try:
-        subs = await list_submissions(page, tokens, competition.team_id)
-    finally:
-        await page.close()
+    page, tokens = await get_api_session(user_id)
+    subs = await list_submissions(page, tokens, competition.team_id)
 
     for sub in subs:
         kaggle_id = str(sub["id"])
@@ -216,23 +207,19 @@ async def resolve_episode_data(user_id: int, competition_id: int, force: bool = 
         if not pending:
             return
 
-        context = await get_session_manager().get_context(user_id)
-        page, tokens = await open_page(context)
-        try:
-            now = dt.datetime.now(dt.timezone.utc)
-            for sub in pending:
-                data = await fetch_submission_episode_data(page, tokens, sub.kaggle_id)
-                if data["error"] is not None or data["count"] < 0:
-                    break  # likely 429 / expired session — stop; resync later
-                sub.episode_count = data["count"]
-                sub.episodes_json = data["episodes"]
-                sub.episodes_synced_at = now
-                if data["score"] is not None:
-                    sub.score = data["score"]
-                await db.commit()
-                await asyncio.sleep(0.25)
-        finally:
-            await page.close()
+        page, tokens = await get_api_session(user_id)
+        now = dt.datetime.now(dt.timezone.utc)
+        for sub in pending:
+            data = await fetch_submission_episode_data(page, tokens, sub.kaggle_id)
+            if data["error"] is not None or data["count"] < 0:
+                break  # likely 429 / expired session — stop; resync later
+            sub.episode_count = data["count"]
+            sub.episodes_json = data["episodes"]
+            sub.episodes_synced_at = now
+            if data["score"] is not None:
+                sub.score = data["score"]
+            await db.commit()
+            await asyncio.sleep(0.25)
 
 
 async def full_resync(user_id: int, competition_id: int) -> None:
@@ -277,12 +264,8 @@ async def get_submission_episodes(db: AsyncSession, user_id: int, submission: Su
     if submission.episodes_json is not None:
         return submission.episodes_json
 
-    context = await get_session_manager().get_context(user_id)
-    page, tokens = await open_page(context)
-    try:
-        data = await fetch_submission_episode_data(page, tokens, submission.kaggle_id)
-    finally:
-        await page.close()
+    page, tokens = await get_api_session(user_id)
+    data = await fetch_submission_episode_data(page, tokens, submission.kaggle_id)
 
     if data["error"] is not None:
         # Don't persist errors; surface rate-limits so the user sees a countdown.

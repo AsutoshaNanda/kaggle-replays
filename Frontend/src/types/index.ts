@@ -166,6 +166,7 @@ export interface LeaderboardSyncResponse {
 
 // --- Collections ---
 export type CollectionItemFilter = 'all' | 'notebooks' | 'discussions'
+export type Medal = 'gold' | 'silver' | 'bronze'
 
 export interface Collection {
   id: number

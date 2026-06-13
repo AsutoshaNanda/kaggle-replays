@@ -6,13 +6,17 @@ by the job's ``item_filter`` (medal→votes order), then per item
 * KERNEL — ``kaggle kernels pull`` via subprocess (ref parsed + validated by
   :func:`kaggle_collections.parse_kernel_ref`),
 * TOPIC — ``GetForumTopicById`` rendered to Markdown,
-* DATASET — ``kaggle datasets download`` (``all`` filter only),
+* DATASET — ``kaggle datasets download`` PLUS a drill-down into the dataset's own
+  top notebooks (``ListKernels`` by ``datasetId``) and discussions
+  (``GetDatasetBasics`` → forumId → ``GetTopicListByForumId``) (``all`` filter only),
 * COMPETITION — capped vote-ordered drill-down into its top notebooks +
   discussions (``all`` filter only; cap = ``per_competition_cap``).
 
+Notebook drill-downs honor the job's optional ``medal_filter`` (gold/silver/bronze).
 Progress is committed after every item so the existing WS/status endpoints
 work unchanged. Item-level failures increment ``failed_count`` and the job
-continues; only infrastructure errors fail the whole job.
+continues; a Kaggle rate-limit (429) aborts the whole job cleanly rather than
+hammering the API item after item.
 """
 
 from __future__ import annotations
@@ -27,11 +31,10 @@ from sqlalchemy import select
 from .. import kaggle_collections as kc
 from ..config import get_settings
 from ..database import AsyncSessionLocal
-from ..kaggle_service import open_page
+from ..kaggle_service import get_api_session
 from ..logging_config import get_logger
 from ..models import Collection, CollectionItem, DownloadJob
 from ..services.collection_service import select_items
-from ..session_manager import get_session_manager
 from ..utils.file_utils import ensure_dir, make_zip, safe_output_path
 from ..utils.sanitize import sanitize_error
 
@@ -43,6 +46,34 @@ _SUBPROCESS_TIMEOUT = 180  # seconds per `kaggle` CLI call
 _FETCH_DELAY = 1.0  # polite gap between Kaggle API calls
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+class _RateLimited(Exception):
+    """Raised when a Kaggle call returns a rate-limit error mid-job (abort signal)."""
+
+
+def _raise_if_rate_limited(error: str | None) -> None:
+    """Turn a Kaggle rate-limit error string into the job-abort signal."""
+    if error and ("rate-limit" in error.lower() or "429" in error):
+        raise _RateLimited(error)
+
+
+def _cap(job: DownloadJob) -> int:
+    """Per-drill-down item cap (competition/dataset); ``None`` column → default."""
+    return job.per_competition_cap if job.per_competition_cap is not None else _DEFAULT_CAP
+
+
+def _medal_set(job: DownloadJob) -> set[str]:
+    """Parse the job's ``medal_filter`` ("gold,silver") into a set (empty = all)."""
+    raw = getattr(job, "medal_filter", None) or ""
+    return {m.strip().lower() for m in raw.split(",") if m.strip()}
+
+
+def _medal_ok(parsed: dict, medals: set[str]) -> bool:
+    """True if a drill-down kernel passes the medal filter (empty filter = all)."""
+    if not medals:
+        return True
+    return (parsed.get("medal") or "") in medals
 
 
 async def run_collection_job(job_uuid: str) -> None:
@@ -88,27 +119,34 @@ async def _execute(db, job: DownloadJob, collection: Collection) -> None:
     out_dir = ensure_dir(safe_output_path(_settings.downloads_base_path, job.user_id, job.job_uuid))
     cli = shutil.which("kaggle")
 
-    manager = get_session_manager()
-    context = await manager.get_context(job.user_id)
-    page, tokens = await open_page(context)
+    # Shared, long-lived per-user page — never closed here.
+    page, tokens = await get_api_session(job.user_id)
     completed = failed = 0
-    try:
-        for item in selected:
-            try:
-                ok = await _process_item(page, tokens, job, item, out_dir, cli)
-            except Exception as exc:  # noqa: BLE001 — one bad item must not kill the job
-                _log.warning("collection_item.error", job=job.job_uuid, item=item.kaggle_doc_id, error=str(exc))
-                ok = False
-            if ok:
-                completed += 1
-            else:
-                failed += 1
-            job.completed, job.failed_count = completed, failed
-            job.latest_episode_id = item.kaggle_doc_id[:100]
-            await db.commit()
-            await asyncio.sleep(_FETCH_DELAY)
-    finally:
-        await page.close()
+    rate_limited = False
+    for item in selected:
+        try:
+            ok = await _process_item(page, tokens, job, item, out_dir, cli)
+        except _RateLimited as exc:
+            # Stop the whole job the moment Kaggle rate-limits us, rather than
+            # failing every remaining item and hammering the API.
+            _log.warning("collection_download.rate_limited", job=job.job_uuid, error=str(exc))
+            rate_limited = True
+            break
+        except Exception as exc:  # noqa: BLE001 — one bad item must not kill the job
+            _log.warning("collection_item.error", job=job.job_uuid, item=item.kaggle_doc_id, error=str(exc))
+            ok = False
+        if ok:
+            completed += 1
+        else:
+            failed += 1
+        job.completed, job.failed_count = completed, failed
+        job.latest_episode_id = item.kaggle_doc_id[:100]
+        await db.commit()
+        await asyncio.sleep(_FETCH_DELAY)
+
+    if rate_limited:
+        await _fail(db, job, kc.RATE_LIMIT_MSG)
+        return
 
     if completed == 0:
         # Nothing produced (empty selection or every item failed): finish without
@@ -149,7 +187,7 @@ async def _process_item(page, tokens, job: DownloadJob, item: CollectionItem, ou
     if doc_type == "TOPIC":
         return await _save_topic(page, tokens, item.url, item.kaggle_doc_id, out_dir / "discussions")
     if doc_type == "DATASET":
-        return await _pull_dataset(item.url, out_dir / "datasets", cli)
+        return await _drill_dataset(page, tokens, job, item, out_dir / "datasets", cli)
     if doc_type == "COMPETITION":
         return await _drill_competition(page, tokens, job, item, out_dir / "competitions")
     # COMMENT and unknown types carry nothing downloadable — count as skipped-ok.
@@ -165,21 +203,24 @@ async def _pull_kernel(url: str | None, dest, cli) -> bool:
     return await _run_cli(cli, "kernels", "pull", f"{ref[0]}/{ref[1]}", "-p", str(dest))
 
 
-async def _pull_dataset(url: str | None, dest, cli) -> bool:
-    """``kaggle datasets download owner/slug`` into ``dest``."""
-    ref = _parse_dataset_ref(url)
-    if ref is None or cli is None:
-        return False
-    ensure_dir(dest)
-    return await _run_cli(cli, "datasets", "download", "-d", f"{ref[0]}/{ref[1]}", "-p", str(dest))
+def _trailing_int(value: str | None) -> int | None:
+    """Extract the trailing numeric id from a doc id like ``dataset-1866141``."""
+    match = re.search(r"(\d+)$", value or "")
+    return int(match.group(1)) if match else None
 
 
 async def _save_topic(page, tokens, url: str | None, kaggle_doc_id: str, dest) -> bool:
-    """Fetch one discussion thread and write it as Markdown."""
+    """Fetch one discussion thread (by URL/doc id) and write it as Markdown."""
     topic_id = kc.topic_id_from_doc(url, kaggle_doc_id)
     if topic_id is None:
         return False
+    return await _save_topic_by_id(page, tokens, topic_id, dest)
+
+
+async def _save_topic_by_id(page, tokens, topic_id: int, dest) -> bool:
+    """Fetch one discussion thread by numeric forumTopicId and write Markdown."""
     topic, error = await kc.fetch_forum_topic(page, tokens, topic_id)
+    _raise_if_rate_limited(error)
     if error is not None or topic is None:
         return False
     ensure_dir(dest)
@@ -188,18 +229,66 @@ async def _save_topic(page, tokens, url: str | None, kaggle_doc_id: str, dest) -
     return True
 
 
+async def _drill_dataset(page, tokens, job: DownloadJob, item: CollectionItem, dest, cli) -> bool:
+    """Download a DATASET: its files, then its top notebooks + discussions.
+
+    Files via ``kaggle datasets download``; notebooks via ``ListKernels`` (by
+    ``datasetId``, votes-desc, capped, medal-filtered); discussions via the
+    dataset ``forumId`` (``GetDatasetBasics``) → ``GetTopicListByForumId``
+    (HOT-ordered, capped). Sub-item failures are logged, not fatal; a rate-limit
+    propagates as :class:`_RateLimited` to abort the job.
+    """
+    base = ensure_dir(dest / _safe_name(item.title, item.kaggle_doc_id))
+    ref = _parse_dataset_ref(item.url)
+    cap = _cap(job)
+    medals = _medal_set(job)
+    any_ok = False
+
+    # 1) The dataset files themselves.
+    if ref and cli:
+        if await _run_cli(cli, "datasets", "download", "-d", f"{ref[0]}/{ref[1]}", "-p", str(ensure_dir(base / "data")), "--unzip"):
+            any_ok = True
+
+    # 2) The dataset's own notebooks (ListKernels by numeric datasetId).
+    dataset_id = _trailing_int(item.kaggle_doc_id)
+    if dataset_id is not None:
+        kernels, error = await kc.enumerate_dataset_kernels(page, tokens, dataset_id, cap)
+        _raise_if_rate_limited(error)
+        for parsed in kernels:
+            if not _medal_ok(parsed, medals):
+                continue
+            if await _pull_kernel(parsed["url"], base / "notebooks", cli):
+                any_ok = True
+            await asyncio.sleep(_FETCH_DELAY)
+
+    # 3) The dataset's discussions (forumId → topic list → per-topic markdown).
+    if ref:
+        forum_id, error = await kc.fetch_dataset_forum_id(page, tokens, ref[0], ref[1])
+        _raise_if_rate_limited(error)
+        if forum_id:
+            topics, error = await kc.fetch_dataset_topics(page, tokens, forum_id, cap)
+            _raise_if_rate_limited(error)
+            for topic in topics:
+                if await _save_topic_by_id(page, tokens, topic["topic_id"], base / "discussions"):
+                    any_ok = True
+                await asyncio.sleep(_FETCH_DELAY)
+
+    return any_ok
+
+
 async def _drill_competition(page, tokens, job: DownloadJob, item: CollectionItem, dest) -> bool:
     """Enumerate a competition's top notebooks + discussions (vote-ordered, capped).
 
     Success means the enumeration worked and at least one sub-item saved (or the
     competition genuinely has none); sub-item failures are logged, not fatal.
     """
-    try:
-        competition_id = int(re.search(r"(\d+)$", item.kaggle_doc_id).group(1))  # type: ignore[union-attr]
-    except (AttributeError, ValueError):
+    competition_id = _trailing_int(item.kaggle_doc_id)
+    if competition_id is None:
         return False
-    cap = job.per_competition_cap if job.per_competition_cap is not None else _DEFAULT_CAP
+    cap = _cap(job)
+    medals = _medal_set(job)
     contents = await kc.enumerate_competition_contents(page, tokens, competition_id, cap)
+    _raise_if_rate_limited(contents["error"])
     if contents["error"] is not None and not contents["kernels"] and not contents["topics"]:
         return False
 
@@ -207,6 +296,8 @@ async def _drill_competition(page, tokens, job: DownloadJob, item: CollectionIte
     cli = shutil.which("kaggle")
     saved = failed = 0
     for parsed in contents["kernels"]:
+        if not _medal_ok(parsed, medals):
+            continue
         ok = await _pull_kernel(parsed["url"], comp_dir / "notebooks", cli)
         saved, failed = saved + ok, failed + (not ok)
         await asyncio.sleep(_FETCH_DELAY)
