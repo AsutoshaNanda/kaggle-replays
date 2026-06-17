@@ -6,7 +6,6 @@ import { useAuth } from '@/auth/useAuth'
 import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { BulkDownloadButton } from '@/components/downloads/BulkDownloadButton'
 import { ProfileModal } from '@/components/profile/ProfileModal'
-import { BoltIcon } from '@/components/shared/icons'
 
 export function Navbar(): JSX.Element {
   const { user, logout } = useAuth()
@@ -49,9 +48,7 @@ export function Navbar(): JSX.Element {
         className="flex items-center gap-2"
         style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: '1rem' }}
       >
-        <span aria-hidden="true" style={{ color: 'var(--accent-cyan)', display: 'inline-flex' }}>
-          <BoltIcon size={20} />
-        </span>
+        <img src="/logo.svg" width={24} height={24} alt="" style={{ display: 'block' }} />
         <span style={{ color: 'var(--text-primary)' }}>Replay Analytics</span>
       </Link>
 

@@ -256,6 +256,27 @@ export async function startCollectionDownload(
   return data
 }
 
+// Download a SINGLE collection item (its notebook+output+log, topic Markdown,
+// or a competition/dataset drill-down) instead of the whole collection.
+export async function startCollectionItemDownload(
+  collectionId: number,
+  itemId: number,
+  perCompetitionCap = 50,
+  medals: Medal[] = [],
+): Promise<CollectionDownloadResponse> {
+  const { data } = await apiClient.post<CollectionDownloadResponse>(
+    `/collections/${collectionId}/items/${itemId}/download`,
+    {
+      item_filter: 'all',
+      format_mode: 'zip',
+      per_competition_cap: perCompetitionCap,
+      medals,
+      confirm: true,
+    },
+  )
+  return data
+}
+
 // --- WebSocket URL helper (token in query param; WS can't set headers) ---
 export function buildWsUrl(jobUuid: string): string | null {
   const token = getAccessToken()

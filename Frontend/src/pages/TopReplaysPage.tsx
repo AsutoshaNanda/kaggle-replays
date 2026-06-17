@@ -29,6 +29,15 @@ export function TopReplaysPage(): JSX.Element {
   const [reloadKey, setReloadKey] = useState(0)
   // Which episode chip is currently kicking off a download (disables it briefly).
   const [downloadingEid, setDownloadingEid] = useState<string | null>(null)
+  // True while the "Download all replays (ZIP)" job is being started.
+  const [downloadingAll, setDownloadingAll] = useState(false)
+
+  // Every resolved replay episode ID across all captured days (first → current),
+  // de-duped — a team's IDs repeat day to day, so a Set both spans the whole
+  // range and shrinks the "huge numbers" list into one ZIP request.
+  const allEpisodeIds = Array.from(
+    new Set(days.flatMap((d) => d.top_performers.flatMap((p) => p.episode_ids))),
+  )
 
   // Active-flag guard: under React.StrictMode the effect runs twice in dev; the
   // flag ensures only the current invocation can toast, so a failure shows at
@@ -76,6 +85,21 @@ export function TopReplaysPage(): JSX.Element {
     }
   }
 
+  const handleDownloadAll = async (): Promise<void> => {
+    if (allEpisodeIds.length === 0) return
+    setDownloadingAll(true)
+    try {
+      const res = await startReplayDownload(allEpisodeIds, 'zip')
+      setActiveJobId(res.job_id)
+      notify('success', `Zipping ${allEpisodeIds.length} replays — see Downloads.`)
+      navigate('/downloads')
+    } catch {
+      notify('error', 'Could not start the replays ZIP download.')
+    } finally {
+      setDownloadingAll(false)
+    }
+  }
+
   const handleDownloadReplay = async (eid: string): Promise<void> => {
     setDownloadingEid(eid)
     try {
@@ -117,6 +141,19 @@ export function TopReplaysPage(): JSX.Element {
         >
           <TargetIcon size={16} />
           {syncing ? 'Syncing…' : 'Sync now'}
+        </button>
+        <button
+          type="button"
+          className="btn-ghost"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          disabled={downloadingAll || allEpisodeIds.length === 0}
+          onClick={() => void handleDownloadAll()}
+          title="Download every resolved replay (first → current date) as one ZIP"
+        >
+          <DownloadIcon size={16} />
+          {downloadingAll
+            ? 'Starting…'
+            : `Download all replays (ZIP)${allEpisodeIds.length ? ` · ${allEpisodeIds.length}` : ''}`}
         </button>
         <button
           type="button"
