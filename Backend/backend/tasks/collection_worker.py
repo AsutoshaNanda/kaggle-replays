@@ -76,6 +76,49 @@ def _medal_ok(parsed: dict, medals: set[str]) -> bool:
     return (parsed.get("medal") or "") in medals
 
 
+class _Progress:
+    """Sub-item progress tracker for a collection job.
+
+    The unit of progress is the actual downloadable SUB-ITEM (one notebook, one
+    discussion, one dataset's files), not the top-level collection item. This is
+    what makes a single-COMPETITION download show a moving bar + ETA instead of
+    sitting at ``0/1`` for an hour while its ~50 notebooks pull one by one.
+
+    ``add_total`` is called the moment a drill-down's sub-item count is known
+    (after enumeration); ``done`` is called as each sub-item finishes. Both
+    commit so the existing WS/poll status endpoints reflect progress live.
+    """
+
+    def __init__(self, db, job: DownloadJob) -> None:
+        self._db = db
+        self._job = job
+        self.total = 0
+        self.completed = 0
+        self.failed = 0
+
+    async def reset(self) -> None:
+        self._job.total = self._job.completed = self._job.failed_count = 0
+        await self._db.commit()
+
+    async def add_total(self, n: int) -> None:
+        if n <= 0:
+            return
+        self.total += n
+        self._job.total = self.total
+        await self._db.commit()
+
+    async def done(self, ok: bool, latest: str | None = None) -> None:
+        if ok:
+            self.completed += 1
+        else:
+            self.failed += 1
+        self._job.completed = self.completed
+        self._job.failed_count = self.failed
+        if latest:
+            self._job.latest_episode_id = str(latest)[:100]
+        await self._db.commit()
+
+
 async def run_collection_job(job_uuid: str) -> None:
     """Execute one collection job by UUID, updating its DB row throughout."""
     async with AsyncSessionLocal() as db:
@@ -112,20 +155,25 @@ async def _execute(db, job: DownloadJob, collection: Collection) -> None:
             )
         ).scalars()
     )
-    selected = select_items(items, job.item_filter or "all")
-    job.total = len(selected)
-    await db.commit()
+    if job.collection_item_id is not None:
+        # Single-item job: download just this one cached item (whatever its type).
+        selected = [i for i in items if i.id == job.collection_item_id]
+    else:
+        selected = select_items(items, job.item_filter or "all")
 
     out_dir = ensure_dir(safe_output_path(_settings.downloads_base_path, job.user_id, job.job_uuid))
     cli = shutil.which("kaggle")
 
     # Shared, long-lived per-user page — never closed here.
     page, tokens = await get_api_session(job.user_id)
-    completed = failed = 0
+    # Progress is counted per downloadable SUB-ITEM (notebook/discussion/dataset
+    # files), so a single competition's drill-down shows a moving bar, not 0/1.
+    prog = _Progress(db, job)
+    await prog.reset()
     rate_limited = False
     for item in selected:
         try:
-            ok = await _process_item(page, tokens, job, item, out_dir, cli)
+            await _process_item(page, tokens, job, item, out_dir, cli, prog)
         except _RateLimited as exc:
             # Stop the whole job the moment Kaggle rate-limits us, rather than
             # failing every remaining item and hammering the API.
@@ -134,16 +182,9 @@ async def _execute(db, job: DownloadJob, collection: Collection) -> None:
             break
         except Exception as exc:  # noqa: BLE001 — one bad item must not kill the job
             _log.warning("collection_item.error", job=job.job_uuid, item=item.kaggle_doc_id, error=str(exc))
-            ok = False
-        if ok:
-            completed += 1
-        else:
-            failed += 1
-        job.completed, job.failed_count = completed, failed
-        job.latest_episode_id = item.kaggle_doc_id[:100]
-        await db.commit()
         await asyncio.sleep(_FETCH_DELAY)
 
+    completed = prog.completed
     if rate_limited:
         await _fail(db, job, kc.RATE_LIMIT_MSG)
         return
@@ -176,31 +217,55 @@ async def _execute(db, job: DownloadJob, collection: Collection) -> None:
     job.completed_at = dt.datetime.now(dt.timezone.utc)
     job.expires_at = job.completed_at + dt.timedelta(hours=_settings.JOB_OUTPUT_TTL_HOURS)
     await db.commit()
-    _log.info("collection_download.done", job=job.job_uuid, completed=completed, failed=failed)
+    _log.info("collection_download.done", job=job.job_uuid, completed=prog.completed, failed=prog.failed)
 
 
-async def _process_item(page, tokens, job: DownloadJob, item: CollectionItem, out_dir, cli) -> bool:
-    """Download one collection item into ``out_dir``; return success."""
+async def _process_item(
+    page, tokens, job: DownloadJob, item: CollectionItem, out_dir, cli, prog: _Progress
+) -> None:
+    """Download one collection item into ``out_dir``, reporting sub-item progress.
+
+    KERNEL/TOPIC are a single unit each; DATASET/COMPETITION fan out and report
+    their own enumerated sub-item counts via ``prog``.
+    """
     doc_type = item.document_type
     if doc_type == "KERNEL":
-        return await _pull_kernel(item.url, out_dir / "notebooks", cli)
-    if doc_type == "TOPIC":
-        return await _save_topic(page, tokens, item.url, item.kaggle_doc_id, out_dir / "discussions")
-    if doc_type == "DATASET":
-        return await _drill_dataset(page, tokens, job, item, out_dir / "datasets", cli)
-    if doc_type == "COMPETITION":
-        return await _drill_competition(page, tokens, job, item, out_dir / "competitions")
-    # COMMENT and unknown types carry nothing downloadable — count as skipped-ok.
-    return True
+        await prog.add_total(1)
+        ok = await _pull_kernel(item.url, out_dir / "notebooks", cli)
+        await prog.done(ok, item.kaggle_doc_id)
+    elif doc_type == "TOPIC":
+        await prog.add_total(1)
+        ok = await _save_topic(page, tokens, item.url, item.kaggle_doc_id, out_dir / "discussions")
+        await prog.done(ok, item.kaggle_doc_id)
+    elif doc_type == "DATASET":
+        await _drill_dataset(page, tokens, job, item, out_dir / "datasets", cli, prog)
+    elif doc_type == "COMPETITION":
+        await _drill_competition(page, tokens, job, item, out_dir / "competitions", prog)
+    else:
+        # COMMENT and unknown types carry nothing downloadable — count as one ok unit.
+        await prog.add_total(1)
+        await prog.done(True, item.kaggle_doc_id)
 
 
 async def _pull_kernel(url: str | None, dest, cli) -> bool:
-    """``kaggle kernels pull owner/slug`` into ``dest``."""
+    """Download a kernel's source + output files + execution log into ``dest``.
+
+    Each kernel lands in its own ``dest/<owner>_<slug>`` subfolder so that the
+    generically-named output files (``__results__.html``, ``submission.csv``,
+    ``<slug>.log``) from different kernels never collide. ``kernels pull`` (with
+    ``-m`` for ``kernel-metadata.json``) decides success; the follow-up
+    ``kernels output`` is best-effort — a kernel with no output, or a transient
+    output error, must NOT flip the item to failed.
+    """
     ref = kc.parse_kernel_ref(url)
     if ref is None or cli is None:
         return False
-    ensure_dir(dest)
-    return await _run_cli(cli, "kernels", "pull", f"{ref[0]}/{ref[1]}", "-p", str(dest))
+    owner, slug = ref
+    kdir = ensure_dir(dest / _safe_name(f"{owner}_{slug}", slug))
+    ok = await _run_cli(cli, "kernels", "pull", f"{owner}/{slug}", "-p", str(kdir), "-m")
+    # Output files + the execution .log — best-effort; absence/failure is non-fatal.
+    await _run_cli(cli, "kernels", "output", f"{owner}/{slug}", "-p", str(kdir), "-q", "-o")
+    return ok
 
 
 async def _save_topic(page, tokens, url: str | None, kaggle_doc_id: str, dest) -> bool:
@@ -223,36 +288,43 @@ async def _save_topic_by_id(page, tokens, topic_id: int, dest) -> bool:
     return True
 
 
-async def _drill_dataset(page, tokens, job: DownloadJob, item: CollectionItem, dest, cli) -> bool:
+async def _drill_dataset(
+    page, tokens, job: DownloadJob, item: CollectionItem, dest, cli, prog: _Progress
+) -> None:
     """Download a DATASET: its files, then its top notebooks + discussions.
 
     Files via ``kaggle datasets download``; notebooks via ``ListKernels`` (by
     ``datasetId``, votes-desc, capped, medal-filtered); discussions via the
     dataset ``forumId`` (``GetDatasetBasics``) → ``GetTopicListByForumId``
-    (HOT-ordered, capped). Sub-item failures are logged, not fatal; a rate-limit
-    propagates as :class:`_RateLimited` to abort the job.
+    (HOT-ordered, capped). Each sub-item is reported through ``prog``; sub-item
+    failures are logged, not fatal; a rate-limit propagates as
+    :class:`_RateLimited` to abort the job.
     """
     base = ensure_dir(dest / _safe_name(item.title, item.kaggle_doc_id))
     ref = kc.parse_dataset_ref(item.url)
     cap = _cap(job)
     medals = _medal_set(job)
-    any_ok = False
 
-    # 1) The dataset files themselves.
+    # 1) The dataset files themselves (one progress unit).
+    await prog.add_total(1)
+    files_ok = False
     if ref and cli:
-        if await _run_cli(cli, "datasets", "download", "-d", f"{ref[0]}/{ref[1]}", "-p", str(ensure_dir(base / "data")), "--unzip"):
-            any_ok = True
+        files_ok = await _run_cli(
+            cli, "datasets", "download", "-d", f"{ref[0]}/{ref[1]}",
+            "-p", str(ensure_dir(base / "data")), "--unzip",
+        )
+    await prog.done(files_ok, item.kaggle_doc_id)
 
     # 2) The dataset's own notebooks (ListKernels by numeric datasetId).
     dataset_id = kc.trailing_int(item.kaggle_doc_id)
     if dataset_id is not None:
         kernels, error = await kc.enumerate_dataset_kernels(page, tokens, dataset_id, cap)
         _raise_if_rate_limited(error)
+        kernels = [k for k in kernels if _medal_ok(k, medals)]
+        await prog.add_total(len(kernels))
         for parsed in kernels:
-            if not _medal_ok(parsed, medals):
-                continue
-            if await _pull_kernel(parsed["url"], base / "notebooks", cli):
-                any_ok = True
+            ok = await _pull_kernel(parsed["url"], base / "notebooks", cli)
+            await prog.done(ok, parsed.get("kaggle_doc_id"))
             await asyncio.sleep(_FETCH_DELAY)
 
     # 3) The dataset's discussions (forumId → topic list → per-topic markdown).
@@ -262,49 +334,62 @@ async def _drill_dataset(page, tokens, job: DownloadJob, item: CollectionItem, d
         if forum_id:
             topics, error = await kc.fetch_dataset_topics(page, tokens, forum_id, cap)
             _raise_if_rate_limited(error)
+            await prog.add_total(len(topics))
             for topic in topics:
-                if await _save_topic_by_id(page, tokens, topic["topic_id"], base / "discussions"):
-                    any_ok = True
+                ok = await _save_topic_by_id(page, tokens, topic["topic_id"], base / "discussions")
+                await prog.done(ok, str(topic["topic_id"]))
                 await asyncio.sleep(_FETCH_DELAY)
 
-    return any_ok
 
-
-async def _drill_competition(page, tokens, job: DownloadJob, item: CollectionItem, dest) -> bool:
+async def _drill_competition(
+    page, tokens, job: DownloadJob, item: CollectionItem, dest, prog: _Progress
+) -> None:
     """Enumerate a competition's top notebooks + discussions (vote-ordered, capped).
 
-    Success means the enumeration worked and at least one sub-item saved (or the
-    competition genuinely has none); sub-item failures are logged, not fatal.
+    Each notebook/discussion is one progress unit reported through ``prog``, so a
+    single-competition download shows a moving bar + ETA. Sub-item failures are
+    logged, not fatal; a rate-limit propagates as :class:`_RateLimited`.
     """
     competition_id = kc.trailing_int(item.kaggle_doc_id)
     if competition_id is None:
-        return False
+        await prog.add_total(1)
+        await prog.done(False, item.kaggle_doc_id)
+        return
     cap = _cap(job)
     medals = _medal_set(job)
     contents = await kc.enumerate_competition_contents(page, tokens, competition_id, cap)
     _raise_if_rate_limited(contents["error"])
-    if contents["error"] is not None and not contents["kernels"] and not contents["topics"]:
-        return False
+    kernels = [k for k in contents["kernels"] if _medal_ok(k, medals)]
+    topics = contents["topics"]
+    if contents["error"] is not None and not kernels and not topics:
+        await prog.add_total(1)
+        await prog.done(False, item.kaggle_doc_id)
+        return
+    if not kernels and not topics:
+        # Genuinely empty competition — count one ok unit so the job isn't "failed".
+        await prog.add_total(1)
+        await prog.done(True, item.kaggle_doc_id)
+        return
 
+    await prog.add_total(len(kernels) + len(topics))
     comp_dir = ensure_dir(dest / _safe_name(item.title, item.kaggle_doc_id))
     cli = shutil.which("kaggle")
-    saved = failed = 0
-    for parsed in contents["kernels"]:
-        if not _medal_ok(parsed, medals):
-            continue
+    failed = 0
+    for parsed in kernels:
         ok = await _pull_kernel(parsed["url"], comp_dir / "notebooks", cli)
-        saved, failed = saved + ok, failed + (not ok)
+        failed += not ok
+        await prog.done(ok, parsed.get("kaggle_doc_id") or item.kaggle_doc_id)
         await asyncio.sleep(_FETCH_DELAY)
-    for parsed in contents["topics"]:
+    for parsed in topics:
         ok = await _save_topic(page, tokens, parsed["url"], parsed["kaggle_doc_id"], comp_dir / "discussions")
-        saved, failed = saved + ok, failed + (not ok)
+        failed += not ok
+        await prog.done(ok, parsed.get("kaggle_doc_id"))
         await asyncio.sleep(_FETCH_DELAY)
     if failed:
         _log.warning(
             "collection_competition.partial",
-            job=job.job_uuid, competition=item.kaggle_doc_id, saved=saved, failed=failed,
+            job=job.job_uuid, competition=item.kaggle_doc_id, failed=failed,
         )
-    return saved > 0 or (not contents["kernels"] and not contents["topics"])
 
 
 async def _run_cli(*argv: str) -> bool:

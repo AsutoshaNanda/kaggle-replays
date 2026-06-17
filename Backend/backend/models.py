@@ -227,6 +227,10 @@ class DownloadJob(Base):
     # Replay-by-id jobs only: explicit episode IDs to download (no owned
     # submission). NULL for submission-based and collection jobs.
     episode_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # Single-item collection jobs only: the one CollectionItem.id to download
+    # (NULL = whole-collection job driven by ``item_filter``). Plain int, not an
+    # FK, so job history survives a collection re-sync that prunes stale items.
+    collection_item_id: Mapped[int | None] = mapped_column(UINT, nullable=True, default=None)
     filter_mode: Mapped[str] = mapped_column(
         Enum("all", "win", "lose", "draw", name="filter_mode_enum"), nullable=False, default="all"
     )

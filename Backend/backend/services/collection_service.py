@@ -191,14 +191,21 @@ async def create_collection_job(
     format_mode: str,
     per_competition_cap: int,
     medals: set[str] | None = None,
+    collection_item_id: int | None = None,
 ) -> DownloadJob:
-    """Insert a queued collection-type ``download_jobs`` row and return it."""
+    """Insert a queued collection-type ``download_jobs`` row and return it.
+
+    ``collection_item_id`` scopes the job to a single cached item (its own
+    notebook/topic, or a competition/dataset drill-down); ``None`` downloads the
+    whole collection filtered by ``item_filter``.
+    """
     job = DownloadJob(
         job_uuid=str(uuid.uuid4()),
         user_id=user_id,
         submission_id=None,
         job_type="collection",
         collection_id=collection_id,
+        collection_item_id=collection_item_id,
         item_filter=item_filter,
         per_competition_cap=per_competition_cap,
         medal_filter=",".join(sorted(medals)) if medals else None,

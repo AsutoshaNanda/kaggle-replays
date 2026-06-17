@@ -8,6 +8,7 @@ import {
   getCollectionItems,
   getCollections,
   startCollectionDownload,
+  startCollectionItemDownload,
   syncCollectionItems,
   syncCollections,
 } from '@/api/endpoints'
@@ -15,7 +16,7 @@ import { CollectionItemDrawer } from '@/components/collections/CollectionItemDra
 import { ConfirmModal } from '@/components/shared/ConfirmModal'
 import { LastSynced } from '@/components/shared/LastSynced'
 import { LoadingSkeleton } from '@/components/shared/LoadingSkeleton'
-import { MedalIcon } from '@/components/shared/icons'
+import { DownloadIcon, MedalIcon } from '@/components/shared/icons'
 import { useToast } from '@/components/shared/ToastProvider'
 import { useDownloadStore } from '@/store/downloadStore'
 import type { Collection, CollectionItem, CollectionItemFilter, Medal } from '@/types'
@@ -36,8 +37,8 @@ const MEDAL_COLOR: Record<string, string> = {
 
 const MEDALS: Medal[] = ['gold', 'silver', 'bronze']
 
-// 6 columns: Medal | Type | Title | Author | Votes | Comments
-const GRID = '60px 110px minmax(220px, 2fr) minmax(140px, 1fr) 70px 90px'
+// 7 columns: Medal | Type | Title | Author | Votes | Comments | Download
+const GRID = '60px 110px minmax(220px, 2fr) minmax(140px, 1fr) 70px 90px 56px'
 
 const TRUNCATE: CSSProperties = {
   overflow: 'hidden',
@@ -73,6 +74,8 @@ export function CollectionsPage(): JSX.Element {
   const [cap, setCap] = useState(50)
   const [modalOpen, setModalOpen] = useState(false)
   const [starting, setStarting] = useState(false)
+  // Which single item is currently being queued (its row spinner), by item id.
+  const [itemBusy, setItemBusy] = useState<number | null>(null)
 
   // Drill-down drawer: clicking a COMPETITION/DATASET item shows its notebooks
   // and discussions in-app instead of redirecting to Kaggle.
@@ -178,6 +181,27 @@ export function CollectionsPage(): JSX.Element {
       notify('error', 'Failed to start the collection download.')
     } finally {
       setStarting(false)
+    }
+  }
+
+  const handleItemDownload = async (item: CollectionItem): Promise<void> => {
+    if (!selected) return
+    setItemBusy(item.id)
+    try {
+      // A single COMPETITION/DATASET fans out into its top notebooks + discussions
+      // (each a slow Kaggle-CLI pull). A cap of 50 = ~100 sub-items ≈ over an hour,
+      // so heavy single-item downloads use a small, fast cap; notebooks/topics
+      // ignore the cap entirely.
+      const heavy = item.document_type === 'COMPETITION' || item.document_type === 'DATASET'
+      const itemCap = heavy ? 10 : cap
+      const res = await startCollectionItemDownload(selected.id, item.id, itemCap, medals)
+      setActiveJobId(res.job_id)
+      notify('success', 'Item download started.')
+      navigate('/downloads')
+    } catch {
+      notify('error', 'Failed to start the item download.')
+    } finally {
+      setItemBusy(null)
     }
   }
 
@@ -348,7 +372,7 @@ export function CollectionsPage(): JSX.Element {
             </div>
           ) : (
             <div className="glass-card overflow-hidden" style={{ overflowX: 'auto' }}>
-              <div className="data-table" style={{ minWidth: 760 }}>
+              <div className="data-table" style={{ minWidth: 820 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: GRID }}>
                   <div className="data-table-header">Medal</div>
                   <div className="data-table-header">Type</div>
@@ -365,6 +389,12 @@ export function CollectionsPage(): JSX.Element {
                     style={{ display: 'flex', justifyContent: 'flex-end' }}
                   >
                     Comments
+                  </div>
+                  <div
+                    className="data-table-header"
+                    style={{ display: 'flex', justifyContent: 'center' }}
+                  >
+                    Get
                   </div>
                 </div>
                 {items.map((item) => (
@@ -441,6 +471,19 @@ export function CollectionsPage(): JSX.Element {
                       style={{ ...TRUNCATE, justifyContent: 'flex-end', color: 'var(--text-muted)' }}
                     >
                       {item.total_comments}
+                    </div>
+                    <div className="data-table-cell" style={{ justifyContent: 'center' }}>
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        style={{ padding: '6px 8px' }}
+                        disabled={itemBusy !== null}
+                        onClick={() => void handleItemDownload(item)}
+                        title="Download just this item (code + output + log for notebooks)"
+                        aria-label={`Download ${item.title}`}
+                      >
+                        {itemBusy === item.id ? '…' : <DownloadIcon size={15} />}
+                      </button>
                     </div>
                   </div>
                 ))}

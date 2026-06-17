@@ -204,3 +204,43 @@ async def download_collection(
         status="success", user_id=current_user.id, resource_type="download_job", resource_id=job.job_uuid,
     )
     return CollectionDownloadResponse(job_id=job.job_uuid, total_items=len(selected), status="queued")
+
+
+@router.post("/{collection_id}/items/{item_id}/download", response_model=CollectionDownloadResponse)
+@limiter.limit("30/hour")
+async def download_collection_item(
+    request: Request,
+    collection_id: int,
+    item_id: int,
+    body: CollectionDownloadRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CollectionDownloadResponse:
+    """Download a SINGLE cached collection item.
+
+    Same worker as the whole-collection job, scoped via ``collection_item_id``: a
+    KERNEL pulls its source + output + log, a TOPIC saves its Markdown, and a
+    COMPETITION/DATASET runs its capped notebooks + discussions drill-down.
+    """
+    if not body.confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Item download requires confirm=true"
+        )
+    collection = await collection_service.get_owned_collection(db, current_user.id, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
+    items = await collection_service.list_items(db, collection.id)
+    item = next((i for i in items if i.id == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found in collection")
+    medals = {m.lower() for m in body.medals}
+    job = await collection_service.create_collection_job(
+        db, current_user.id, collection.id, body.item_filter, body.format_mode,
+        body.per_competition_cap, medals, collection_item_id=item.id,
+    )
+    asyncio.create_task(run_collection_job(job.job_uuid))
+    await write_audit(
+        db, action="collections.item_download", ip_address=request.state.client_ip,
+        status="success", user_id=current_user.id, resource_type="download_job", resource_id=job.job_uuid,
+    )
+    return CollectionDownloadResponse(job_id=job.job_uuid, total_items=1, status="queued")

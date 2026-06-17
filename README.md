@@ -1,4 +1,8 @@
-# Kaggle Replays
+<p align="center">
+  <img src="docs/logo.svg" alt="Kaggle Replays logo" width="96" height="96" />
+</p>
+
+<h1 align="center">Kaggle Replays</h1>
 
 Browse, view, and bulk-download the episode replays from your Kaggle simulation competitions, all from one local web app — with a data layer designed so you never get rate-limited or banned for collecting them.
 

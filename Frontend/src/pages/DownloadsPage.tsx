@@ -23,6 +23,9 @@ export function DownloadsPage(): JSX.Element {
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  // A history row the user clicked "View" on — kept SEPARATE from the live
+  // running job so inspecting history never hijacks the active job's card.
+  const [viewingJobId, setViewingJobId] = useState<string | null>(null)
 
   // Guards against re-fetch loops: only one fetch in flight, and the mount
   // fetch fires exactly once (it does NOT auto-retry on failure — the user
@@ -31,6 +34,7 @@ export function DownloadsPage(): JSX.Element {
   const prevJobStatus = useRef<string | null>(null)
 
   const liveJob = useDownloadJob(activeJobId)
+  const viewedJob = useDownloadJob(viewingJobId)
 
   const loadHistory = useCallback(async (): Promise<void> => {
     if (inFlight.current) return
@@ -89,6 +93,7 @@ export function DownloadsPage(): JSX.Element {
       await cancelJob(jobId)
       notify('info', 'Download cancelled.')
       if (activeJobId === jobId) setActiveJobId(null)
+      if (viewingJobId === jobId) setViewingJobId(null)
       await loadHistory()
     } catch {
       notify('error', 'Could not cancel the job.')
@@ -145,6 +150,25 @@ export function DownloadsPage(): JSX.Element {
         </section>
       )}
 
+      {/* A history row opened via "View" — shown in its OWN slot so it never
+          replaces the live Active Job above. */}
+      {viewedJob && viewingJobId !== activeJobId && (
+        <section className="animate-in stagger-2">
+          <div className="flex items-center gap-3 mb-4" style={{ flexWrap: 'wrap' }}>
+            <h2 style={{ fontSize: '1.15rem', margin: 0 }}>Selected Job</h2>
+            <button
+              type="button"
+              className="btn-ghost"
+              style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+              onClick={() => setViewingJobId(null)}
+            >
+              Close
+            </button>
+          </div>
+          <DownloadProgressCard job={viewedJob} onCancel={(id) => void handleCancel(id)} />
+        </section>
+      )}
+
       <section className="animate-in stagger-3">
         <h2 className="mb-4" style={{ fontSize: '1.25rem' }}>
           Download History
@@ -163,7 +187,7 @@ export function DownloadsPage(): JSX.Element {
           <DownloadHistoryTable
             jobs={history}
             loading={loadingHistory}
-            onSelect={(id) => setActiveJobId(id)}
+            onSelect={(id) => setViewingJobId(id)}
           />
         )}
       </section>
