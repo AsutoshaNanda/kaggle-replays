@@ -10,6 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Competition, DownloadJob, Submission
 
+# Minimum completed sub-items before an ETA is trustworthy. One or two finished
+# items (often a slow first notebook) extrapolate to a wildly inflated estimate
+# that climbs every poll while `completed` is stuck — so withhold the ETA until
+# the per-item average rests on a few samples.
+_MIN_ETA_SAMPLES = 3
+
 
 async def create_job(
     db: AsyncSession, user_id: int, submission_id: int, filter_mode: str, format_mode: str, is_bulk: bool = False
@@ -86,7 +92,7 @@ def progress_view(job: DownloadJob) -> dict:
     end = _aware(job.completed_at) if job.completed_at else now
     elapsed = (end - started).total_seconds() if started else 0.0
     remaining = None
-    if job.status == "running" and job.completed and job.total:
+    if job.status == "running" and job.completed >= _MIN_ETA_SAMPLES and job.total:
         per = elapsed / job.completed
         remaining = max(0.0, per * (job.total - job.completed))
     return {

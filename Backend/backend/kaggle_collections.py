@@ -54,6 +54,12 @@ ORDER_BY_VOTES = "LIST_SEARCH_CONTENT_ORDER_BY_VOTES"
 RATE_LIMIT_MSG = "Kaggle is rate-limiting requests (429). Please wait a minute and retry."
 SESSION_EXPIRED_MSG = "Kaggle session expired. Re-run `python login.py` to reconnect."
 
+# Hard ceiling on one internal-API round-trip. The fetch runs inside the browser
+# page and normally returns in well under a second; without this cap a stalled
+# response awaits forever and freezes the entire collection download (observed: a
+# job stuck at 1/200 for 20+ minutes with no error logged).
+_API_TIMEOUT_SECONDS = 30
+
 # Kernel/owner path segments accepted for `kaggle kernels pull` (never let an
 # arbitrary URL fragment reach a subprocess argument).
 _REF_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -78,9 +84,12 @@ async def _post_internal(page, tokens, path: str, payload: dict) -> dict:
     and dataset drill-downs never burst Kaggle's private API.
     """
     await kaggle_throttle.acquire()
-    try:
-        resp = await page.evaluate(
-            """
+    # Build the in-page fetch, then run it under a hard timeout: a stalled response
+    # would otherwise await forever and freeze the whole download. A timeout maps to
+    # the same soft-failure shape as an evaluate exception below, so the caller
+    # fails this one call and the job keeps moving.
+    fetch_coro = page.evaluate(
+        """
         async ({xsrf, buildHash, path, payload}) => {
             const r = await fetch(path, {
                 method: "POST",
@@ -94,14 +103,16 @@ async def _post_internal(page, tokens, path: str, payload: dict) -> dict:
             return { status: r.status, text: await r.text() };
         }
         """,
-            {
-                "xsrf": tokens["xsrf"],
-                "buildHash": tokens["build_hash"],
-                "path": path,
-                "payload": payload,
-            },
-        )
-    except Exception:  # noqa: BLE001
+        {
+            "xsrf": tokens["xsrf"],
+            "buildHash": tokens["build_hash"],
+            "path": path,
+            "payload": payload,
+        },
+    )
+    try:
+        resp = await asyncio.wait_for(fetch_coro, timeout=_API_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001  (asyncio.TimeoutError included — stalled fetch)
         return {"status": 0, "text": ""}
     kaggle_throttle.record(resp.get("status") if isinstance(resp, dict) else None)
     return resp
