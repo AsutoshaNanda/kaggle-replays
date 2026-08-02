@@ -203,7 +203,7 @@ async def _execute(db, job: DownloadJob, collection: Collection) -> None:
 
     output_path = str(out_dir)
     if job.format_mode in ("zip", "both"):
-        zip_path = make_zip(out_dir, out_dir)
+        zip_path = await asyncio.to_thread(make_zip, out_dir, out_dir)
         output_path = str(zip_path)
         if job.format_mode == "zip":
             for child in out_dir.iterdir():
