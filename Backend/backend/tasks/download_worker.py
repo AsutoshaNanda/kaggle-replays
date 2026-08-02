@@ -9,6 +9,7 @@ reaches the DB.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 
 from sqlalchemy import select
@@ -21,10 +22,16 @@ from ..models import DownloadJob, Submission
 from ..session_manager import get_session_manager
 from ..utils.file_utils import ensure_dir, make_zip, safe_output_path
 from ..utils.sanitize import sanitize_error
+from ..utils.throttle import kaggle_throttle
 
 _settings = get_settings()
 _log = get_logger("backend.download_worker")
-_BATCH = 10
+# Replay fetches now go through the same global pacer as every other Kaggle call
+# and are kept to small concurrent batches; a rate-limited replay is retried with
+# exponential backoff instead of being marked failed on the first 429.
+_BATCH = 5
+_MAX_BATCH_RETRIES = 4
+_RETRY_BASE = 3.0
 
 
 async def run_download_job(job_uuid: str) -> None:
@@ -82,21 +89,7 @@ async def _execute(db, job: DownloadJob, submission: Submission) -> None:
         job.total = len(wanted)
         await db.commit()
 
-        import downloader  # project-root module (already on sys.path)
-
-        completed = failed = 0
-        for batch in _chunks(wanted, _BATCH):
-            results = await downloader.fetch_replay_batch(page, batch)
-            for res in results:
-                eid = str(res["id"])
-                if res.get("status") == 200 and res.get("text") is not None:
-                    (out_dir / f"{eid}.json").write_text(res["text"], encoding="utf-8")
-                    completed += 1
-                else:
-                    failed += 1
-                job.latest_episode_id = eid
-            job.completed, job.failed_count = completed, failed
-            await db.commit()
+        completed = await _download_replays(db, job, page, out_dir, wanted)
     finally:
         await page.close()
 
@@ -112,7 +105,7 @@ async def _execute(db, job: DownloadJob, submission: Submission) -> None:
 
     output_path = str(out_dir)
     if job.format_mode in ("zip", "both"):
-        zip_path = make_zip(out_dir, out_dir)
+        zip_path = await asyncio.to_thread(make_zip, out_dir, out_dir)
         output_path = str(zip_path)
         if job.format_mode == "zip":
             for jf in out_dir.glob("*.json"):
@@ -141,21 +134,7 @@ async def _execute_replays(db, job: DownloadJob) -> None:
         job.total = len(wanted)
         await db.commit()
 
-        import downloader  # project-root module (already on sys.path)
-
-        completed = failed = 0
-        for batch in _chunks(wanted, _BATCH):
-            results = await downloader.fetch_replay_batch(page, batch)
-            for res in results:
-                eid = str(res["id"])
-                if res.get("status") == 200 and res.get("text") is not None:
-                    (out_dir / f"{eid}.json").write_text(res["text"], encoding="utf-8")
-                    completed += 1
-                else:
-                    failed += 1
-                job.latest_episode_id = eid
-            job.completed, job.failed_count = completed, failed
-            await db.commit()
+        completed = await _download_replays(db, job, page, out_dir, wanted)
     finally:
         await page.close()
 
@@ -169,7 +148,7 @@ async def _execute_replays(db, job: DownloadJob) -> None:
 
     output_path = str(out_dir)
     if job.format_mode in ("zip", "both"):
-        zip_path = make_zip(out_dir, out_dir)
+        zip_path = await asyncio.to_thread(make_zip, out_dir, out_dir)
         output_path = str(zip_path)
         if job.format_mode == "zip":
             for jf in out_dir.glob("*.json"):
@@ -181,6 +160,53 @@ async def _execute_replays(db, job: DownloadJob) -> None:
     job.expires_at = job.completed_at + dt.timedelta(hours=_settings.JOB_OUTPUT_TTL_HOURS)
     await db.commit()
     _log.info("download.done", job=job.job_uuid, completed=job.completed, failed=job.failed_count)
+
+
+async def _download_replays(db, job: DownloadJob, page, out_dir, wanted: list[str]) -> int:
+    """Fetch replays in small, throttle-paced batches with retry-on-429.
+
+    Every batch is spaced through the global ``kaggle_throttle`` (replay downloads
+    no longer bypass the pacer that protects every other Kaggle call), the throttle
+    backs off automatically when Kaggle returns 429, and a rate-limited episode is
+    RETRIED with exponential backoff rather than counted as failed on the first 429.
+    Progress is committed after every batch. Returns the count of saved replays.
+    """
+    import downloader  # project-root module (already on sys.path)
+
+    completed = failed = 0
+    pending = list(wanted)
+    for attempt in range(_MAX_BATCH_RETRIES + 1):
+        rate_limited: list[str] = []
+        for batch in _chunks(pending, _BATCH):
+            await kaggle_throttle.acquire()  # pace batch starts; auto-slows after a 429
+            results = await downloader.fetch_replay_batch(page, batch)
+            hit_429 = False
+            for res in results:
+                eid = str(res["id"])
+                status = res.get("status")
+                if status == 200 and res.get("text") is not None:
+                    (out_dir / f"{eid}.json").write_text(res["text"], encoding="utf-8")
+                    completed += 1
+                elif status == 429:
+                    rate_limited.append(eid)
+                    hit_429 = True
+                else:
+                    failed += 1
+                job.latest_episode_id = eid
+            kaggle_throttle.record(429 if hit_429 else 200)
+            job.completed, job.failed_count = completed, failed
+            await db.commit()
+        pending = rate_limited
+        if not pending:
+            break
+        if attempt < _MAX_BATCH_RETRIES:
+            await asyncio.sleep(min(30.0, _RETRY_BASE * (2 ** attempt)))
+    # Anything still rate-limited after every retry counts as failed.
+    if pending:
+        failed += len(pending)
+        job.failed_count = failed
+        await db.commit()
+    return completed
 
 
 def _apply_filter(id_to_ep: dict, submission_kaggle_id: str, filter_mode: str) -> list[str]:
