@@ -163,20 +163,23 @@ async def _execute_replays(db, job: DownloadJob) -> None:
 
 
 async def _download_replays(db, job: DownloadJob, page, out_dir, wanted: list[str]) -> int:
-    """Fetch replays in small, throttle-paced batches with retry-on-429.
+    """Fetch replays in small, throttle-paced batches with retry-on-failure.
 
-    Every batch is spaced through the global ``kaggle_throttle`` (replay downloads
-    no longer bypass the pacer that protects every other Kaggle call), the throttle
-    backs off automatically when Kaggle returns 429, and a rate-limited episode is
-    RETRIED with exponential backoff rather than counted as failed on the first 429.
+    Every batch is spaced through the global ``kaggle_throttle``. If a batch item
+    fails (429 rate limit, 5xx server error, or connection reset/timeout), it is
+    queued for RETRY with exponential backoff rather than immediately failed.
     Progress is committed after every batch. Returns the count of saved replays.
     """
     import downloader  # project-root module (already on sys.path)
 
-    completed = failed = 0
+    completed = 0
     pending = list(wanted)
+
+    def _write_one(filepath, text: str) -> None:
+        filepath.write_text(text, encoding="utf-8")
+
     for attempt in range(_MAX_BATCH_RETRIES + 1):
-        rate_limited: list[str] = []
+        to_retry: list[str] = []
         for batch in _chunks(pending, _BATCH):
             await kaggle_throttle.acquire()  # pace batch starts; auto-slows after a 429
             results = await downloader.fetch_replay_batch(page, batch)
@@ -185,27 +188,29 @@ async def _download_replays(db, job: DownloadJob, page, out_dir, wanted: list[st
                 eid = str(res["id"])
                 status = res.get("status")
                 if status == 200 and res.get("text") is not None:
-                    (out_dir / f"{eid}.json").write_text(res["text"], encoding="utf-8")
+                    await asyncio.to_thread(_write_one, out_dir / f"{eid}.json", res["text"])
                     completed += 1
-                elif status == 429:
-                    rate_limited.append(eid)
-                    hit_429 = True
                 else:
-                    failed += 1
+                    if status == 429:
+                        hit_429 = True
+                    _log.warning("Replay fetch failed, scheduling retry", episode_id=eid, status=status, attempt=attempt)
+                    to_retry.append(eid)
                 job.latest_episode_id = eid
             kaggle_throttle.record(429 if hit_429 else 200)
-            job.completed, job.failed_count = completed, failed
+            job.completed = completed
             await db.commit()
-        pending = rate_limited
+        pending = to_retry
         if not pending:
             break
         if attempt < _MAX_BATCH_RETRIES:
+            _log.info("Retrying failed replay downloads", count=len(pending), attempt=attempt + 1)
             await asyncio.sleep(min(30.0, _RETRY_BASE * (2 ** attempt)))
-    # Anything still rate-limited after every retry counts as failed.
+
     if pending:
-        failed += len(pending)
-        job.failed_count = failed
+        job.failed_count = len(pending)
         await db.commit()
+        _log.error("Replay downloads permanently failed after retries", count=len(pending), episodes=pending)
+
     return completed
 
 

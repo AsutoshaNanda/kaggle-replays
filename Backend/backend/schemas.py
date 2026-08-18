@@ -236,10 +236,10 @@ class ReplayDownloadRequest(_StrictModel):
     """Body of ``POST /downloads/replays`` — download specific episodes by ID.
 
     Used by the Top 10% Replays page to grab a performer's replays directly; no
-    owned submission is involved. IDs are bounded to keep one job sane.
+    owned submission is involved.
     """
 
-    episode_ids: list[str] = Field(min_length=1, max_length=200)
+    episode_ids: list[str] = Field(min_length=1)
     format_mode: FormatMode = "zip"
 
 
