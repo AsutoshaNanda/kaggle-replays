@@ -25,6 +25,8 @@ from .middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from .routers import auth, collections, competitions, downloads, leaderboard, submissions, ws
 from .session_manager import get_session_manager
 from .tasks.leaderboard_worker import daily_scheduler_loop
+from .tasks.download_worker import resume_incomplete_download_jobs
+from .tasks.export_worker import resume_export_jobs
 
 _settings = get_settings()
 
@@ -43,6 +45,12 @@ async def lifespan(app: FastAPI):
         daily_scheduler_loop(AsyncSessionLocal, manager, stop_event)
     )
     log.info("app.startup", origins=_settings.allowed_origins_list)
+    resumed_jobs = await resume_incomplete_download_jobs()
+    if resumed_jobs:
+        log.info("downloads.resumed", count=resumed_jobs)
+    resumed_exports = await resume_export_jobs()
+    if resumed_exports:
+        log.info("exports.resumed", count=resumed_exports)
 
     try:
         yield
@@ -53,7 +61,10 @@ async def lifespan(app: FastAPI):
             await scheduler_task
         except asyncio.CancelledError:
             pass
-        await manager.close_all()
+        try:
+            await manager.close_all()
+        except Exception as exc:
+            log.warning("session.close_failed", error=str(exc))
         log.info("app.shutdown")
 
 

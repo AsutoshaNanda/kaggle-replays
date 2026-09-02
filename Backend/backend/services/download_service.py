@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Competition, DownloadJob, Submission
+from ..utils.sanitize import safe_component
 
 # Minimum completed sub-items before an ETA is trustworthy. One or two finished
 # items (often a slow first notebook) extrapolate to a wildly inflated estimate
@@ -37,7 +38,12 @@ async def create_job(
 
 
 async def create_replay_job(
-    db: AsyncSession, user_id: int, episode_ids: list[str], format_mode: str
+    db: AsyncSession,
+    user_id: int,
+    episode_ids: list[str],
+    format_mode: str,
+    archive_name: str | None = None,
+    export_job_id: int | None = None,
 ) -> DownloadJob:
     """Insert a queued replay-by-id job (no owned submission) and return it."""
     ids = [str(e) for e in episode_ids]
@@ -47,6 +53,8 @@ async def create_replay_job(
         submission_id=None,
         job_type="episodes",
         episode_ids=ids,
+        archive_name=safe_component(archive_name)[:200] if archive_name else None,
+        export_job_id=export_job_id,
         filter_mode="all",
         format_mode=format_mode,
         is_bulk=False,
@@ -130,6 +138,7 @@ def history_view(job: DownloadJob) -> dict:
         "submission_title": submission.title if submission else None,
         "submission_score": submission.score if submission else None,
         "collection_name": collection.name if collection else None,
+        "archive_name": job.archive_name,
         "created_at": job.created_at,
         "started_at": job.started_at,
         "completed_at": job.completed_at,

@@ -115,7 +115,7 @@ export function SubmissionsPage(): JSX.Element {
           onClick={() => navigate(`/competitions/${competitionId}/top-replays`)}
         >
           <TargetIcon size={16} />
-          Top 10% Replays
+          Top 100 Replays
         </button>
         <button
           type="button"

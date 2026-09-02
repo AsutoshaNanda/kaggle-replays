@@ -19,6 +19,7 @@ JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 JobType = Literal["episodes", "collection"]
 CollectionItemFilter = Literal["all", "notebooks", "discussions", "datasets", "competitions"]
 Medal = Literal["gold", "silver", "bronze"]
+ExportTarget = Literal["kaggle_dataset", "google_drive"]
 
 
 class _StrictModel(BaseModel):
@@ -235,12 +236,13 @@ class DownloadStartResponse(BaseModel):
 class ReplayDownloadRequest(_StrictModel):
     """Body of ``POST /downloads/replays`` — download specific episodes by ID.
 
-    Used by the Top 10% Replays page to grab a performer's replays directly; no
+    Used by the Top 100 Replays page to grab a performer's replays directly; no
     owned submission is involved. IDs are bounded to keep one job sane.
     """
 
-    episode_ids: list[str] = Field(min_length=1, max_length=200)
+    episode_ids: list[str] = Field(min_length=1, max_length=5000)
     format_mode: FormatMode = "zip"
+    archive_name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class BulkDownloadRequest(_StrictModel):
@@ -290,6 +292,7 @@ class JobHistoryItem(_ORMModel):
     submission_title: str | None = None
     submission_score: float | None = None
     collection_name: str | None = None
+    archive_name: str | None = None
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
@@ -303,7 +306,7 @@ class JobHistoryResponse(BaseModel):
 
 # --- Leaderboard (feature add-on; schemas live here per its spec) -----------
 class TopPerformer(BaseModel):
-    """A top-10% team within a daily leaderboard snapshot."""
+    """A top-100 team within a daily leaderboard snapshot."""
 
     team_id: str
     team_name: str | None = None
@@ -311,6 +314,8 @@ class TopPerformer(BaseModel):
     score: float | None = None
     best_submission_id: str | None = None
     episode_ids: list[str] = Field(default_factory=list)
+    episode_count: int = 0
+    episodes_resolved: bool = False
 
 
 class LeaderboardRow(BaseModel):
@@ -372,3 +377,34 @@ class LeaderboardSyncResponse(BaseModel):
     status: str
     mode: Literal["sync", "backfill"]
     message: str
+
+
+class Top100ExportRequest(_StrictModel):
+    target: ExportTarget
+    public: bool = False
+
+
+class Top100ExportJob(BaseModel):
+    job_id: str
+    target: ExportTarget
+    status: str
+    public: bool
+    total_players: int
+    resolved_players: int
+    completed_players: int
+    total_episodes: int
+    completed_episodes: int
+    current_rank: int | None = None
+    result_url: str | None = None
+    destination: str | None = None
+    error: str | None = None
+
+
+class Top100ExportLatestResponse(BaseModel):
+    job: Top100ExportJob | None = None
+
+
+class Top100ExportCapabilities(BaseModel):
+    kaggle_dataset_ready: bool
+    google_drive_ready: bool
+    google_drive_message: str

@@ -14,6 +14,7 @@ Phases 1 + 2 of the platform:
 ```
 Backend/
 ├── downloader.py            # Phase 1 CLI (imported by the backend worker)
+├── top_players_downloader.py # daily top-100 player/day ZIP exporter
 ├── improvements.md          # roadmap
 ├── login.py, competitions.py, submissions.py, inspect_*.py, test*.py
 │                            # original Phase 1 helper scripts (login.py creates auth.json)
@@ -83,6 +84,48 @@ deployment.
 > `auth.json` is created by `python login.py` (interactive Kaggle login). It and
 > `request.txt` hold live session secrets and are gitignored.
 
+## Daily top 100 replay ZIPs
+
+Run the focused CLI once per day from `Backend/`. It reuses `auth.json`, captures
+the current top 100, and creates one ZIP per player for that date.
+
+```bash
+.venv/bin/python top_players_downloader.py --competition COMPETITION_SLUG
+```
+
+Output is player first, then day:
+
+```text
+downloads/top-players/COMPETITION_SLUG/
+├── Player_Name--TEAM_ID/
+│   ├── 2026-08-30.zip
+│   └── 2026-08-31.zip
+├── summary.csv
+└── summary.json
+```
+
+Each ZIP contains only replay JSON files. The terminal and both summary files
+show the included and expected episode counts. Saved snapshots and partial JSON
+files make reruns resumable. HTTP 429 responses pause the process with backoff
+and then continue. The competition deadline is the final output date, even if
+the command is run later.
+
+Kaggle does not expose exact historical daily standings. Run this command every
+day to capture the whole competition. A missed day cannot be recreated exactly
+after the fact. Existing captured days are always resumed before the current
+day.
+
+Optional Google Drive upload uses `rclone` after every local ZIP has finished:
+
+```bash
+rclone config
+.venv/bin/python top_players_downloader.py \
+  --competition COMPETITION_SLUG \
+  --drive-destination 'gdrive:Kaggle-Replays'
+```
+
+Use `--help` to change pacing, retry limits, output location, or the top-player count.
+
 ## Key API endpoints
 
 | Method | Path | Notes |
@@ -95,7 +138,7 @@ deployment.
 | GET | `/downloads`, `/downloads/{uuid}/status`, `/downloads/{uuid}/file` | history / progress / ZIP stream |
 | DELETE | `/downloads/{uuid}` | cancel + delete output |
 | WS | `/ws/downloads/{uuid}?token=` | live progress |
-| GET | `/leaderboard/{id}/history`, `/leaderboard/{id}/date/{date}/replays` | top-10% daily |
+| GET | `/leaderboard/{id}/history`, `/leaderboard/{id}/date/{date}/replays` | top-100 daily |
 | POST | `/leaderboard/{id}/sync` | daily sync or backfill; 2/hr |
 
 ## Security highlights
