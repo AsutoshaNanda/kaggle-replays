@@ -345,9 +345,9 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
         _write_manifest(stage / "manifest.csv", [])
 
     mappings = dict(job.download_job_ids or {})
+    legacy_known_dataset = bool(job.dataset_ref and _KAGGLE_STATE_KEY not in mappings)
     _merge_progress_state(mappings, _read_progress(stage / "progress.json"))
     state = _kaggle_state(mappings)
-    legacy_known_dataset = bool(job.dataset_ref and _KAGGLE_STATE_KEY not in mappings)
     known_dataset = bool(job.dataset_ref or int(state.get("version", 0)) > 0)
     result_url = f"https://www.kaggle.com/datasets/{dataset_ref}"
 
@@ -362,6 +362,7 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
             raise RuntimeError("Could not verify the existing Kaggle dataset")
 
     if status is None:
+        _write_manifest(stage / "manifest.csv", [])
         job.status = "uploading"
         state.update({"published_players": 0, "version": 1, "status": "pending", "confirmed": False})
         mappings[_KAGGLE_STATE_KEY] = state
