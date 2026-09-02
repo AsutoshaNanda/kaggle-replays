@@ -71,12 +71,6 @@ export function TopReplaysPage(): JSX.Element {
         if (!active) return
         setDays([...res.days].reverse())
         setSyncedAt(res.last_synced_at ?? null)
-
-        // Select all unique resolved episodes by default on load
-        const resolvedEpisodeIds = Array.from(
-          new Set(reversedDays.flatMap((d) => d.top_performers.flatMap((p) => p.episode_ids))),
-        )
-        setSelectedEpisodeIds(new Set(resolvedEpisodeIds))
       })
       .catch(() => active && notify('error', 'Could not load top-replay history.'))
       .finally(() => active && setLoading(false))
