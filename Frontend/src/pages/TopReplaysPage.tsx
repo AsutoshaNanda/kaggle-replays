@@ -173,7 +173,7 @@ export function TopReplaysPage(): JSX.Element {
       notify(
         'success',
         target === 'kaggle_dataset'
-          ? 'Dataset export queued. The Kaggle link will appear here when publishing finishes.'
+          ? 'Dataset export started. The Kaggle link will appear as soon as the dataset is created.'
           : 'Google Drive export queued.',
       )
     } catch (error) {
@@ -386,6 +386,7 @@ export function TopReplaysPage(): JSX.Element {
 
 function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
   const status = exportStatus(job)
+  const isKaggle = job.target === 'kaggle_dataset'
   return (
     <div
       className="flex items-center justify-between gap-3 flex-wrap"
@@ -397,10 +398,23 @@ function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
         fontSize: '0.8rem',
       }}
     >
-      <span>
+      <div>
         <strong>{label}</strong>
-        <span style={{ color: 'var(--text-muted)' }}> · {status}</span>
-      </span>
+        {isKaggle ? (
+          <div
+            className="mono"
+            style={{ color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.65 }}
+          >
+            <div>Players prepared: {job.completed_players} / {job.total_players}</div>
+            <div>Players on Kaggle: {job.players_on_kaggle} / {job.total_players}</div>
+            <div>Current rank: {job.current_rank ?? '—'}</div>
+            <div>Kaggle version: {job.kaggle_version || '—'}</div>
+            <div>Status: {status}</div>
+          </div>
+        ) : (
+          <span style={{ color: 'var(--text-muted)' }}> · {status}</span>
+        )}
+      </div>
       {job.result_url && (
         <a
           href={job.result_url}
@@ -417,15 +431,15 @@ function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
 }
 
 function exportStatus(job: Top100ExportJob): string {
-  if (job.status === 'waiting_for_replays') {
+  if (job.status === 'failed') return job.error ?? 'Failed'
+  if (job.status === 'done') return 'Ready'
+  if (job.status === 'uploading') return 'Publishing'
+  if (job.target === 'google_drive' && job.status === 'waiting_for_replays') {
     return `resolving players ${job.resolved_players}/${job.total_players}`
   }
-  if (job.status === 'downloading') {
+  if (job.target === 'google_drive' && job.status === 'downloading') {
     const rank = job.current_rank ? `, rank ${job.current_rank}` : ''
     return `preparing ZIPs ${job.completed_players}/${job.total_players}${rank}`
   }
-  if (job.status === 'uploading') return 'uploading and verifying'
-  if (job.status === 'done') return `${job.completed_players} ZIPs published`
-  if (job.status === 'failed') return job.error ?? 'failed'
-  return 'queued'
+  return 'Downloading'
 }

@@ -392,6 +392,9 @@ class Top100ExportJob(BaseModel):
     total_players: int
     resolved_players: int
     completed_players: int
+    players_on_kaggle: int = 0
+    kaggle_version: int = 0
+    kaggle_status: Literal["pending", "ready", "error"] | None = None
     total_episodes: int
     completed_episodes: int
     current_rank: int | None = None
