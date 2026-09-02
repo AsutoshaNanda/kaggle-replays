@@ -97,3 +97,12 @@ export function MedalIcon(p: IconProps): JSX.Element {
 export function UserIcon(p: IconProps): JSX.Element {
   return <svg {...base(p)}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
 }
+export function CheckSquareIcon(p: IconProps): JSX.Element {
+  return <svg {...base(p)}><rect x="3" y="3" width="18" height="18" rx="4" /><path d="m9 12 2 2 4-4" /></svg>
+}
+export function SquareIcon(p: IconProps): JSX.Element {
+  return <svg {...base(p)}><rect x="3" y="3" width="18" height="18" rx="4" /></svg>
+}
+export function MinusSquareIcon(p: IconProps): JSX.Element {
+  return <svg {...base(p)}><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 12h8" /></svg>
+}
