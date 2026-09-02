@@ -1,5 +1,5 @@
 // "Last synced X ago" label. Renders nothing when there is no timestamp.
-// Used on Submissions, Leaderboard and Top 10% Replays so the user can see how
+// Used on Submissions, Leaderboard and Top 100 Replays so the user can see how
 // fresh the cached data is (it is NOT auto-refetched — sync is manual/daily).
 
 import type { JSX } from 'react'

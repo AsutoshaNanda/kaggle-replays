@@ -24,6 +24,10 @@ import type {
   SubmissionListResponse,
   TabFilter,
   TokenResponse,
+  Top100ExportCapabilities,
+  Top100ExportJob,
+  Top100ExportLatestResponse,
+  Top100ExportTarget,
   User,
 } from '@/types'
 
@@ -83,6 +87,38 @@ export async function syncLeaderboard(
   const { data } = await apiClient.post<LeaderboardSyncResponse>(
     `/leaderboard/${competitionId}/sync`,
     { backfill, from_date: fromDate ?? null, to_date: toDate ?? null },
+  )
+  return data
+}
+
+export async function getTop100ExportCapabilities(
+  competitionId: number,
+): Promise<Top100ExportCapabilities> {
+  const { data } = await apiClient.get<Top100ExportCapabilities>(
+    `/leaderboard/${competitionId}/export-capabilities`,
+  )
+  return data
+}
+
+export async function startTop100Export(
+  competitionId: number,
+  target: Top100ExportTarget,
+  isPublic = false,
+): Promise<Top100ExportJob> {
+  const { data } = await apiClient.post<Top100ExportJob>(
+    `/leaderboard/${competitionId}/exports`,
+    { target, public: isPublic },
+  )
+  return data
+}
+
+export async function getLatestTop100Export(
+  competitionId: number,
+  target: Top100ExportTarget,
+): Promise<Top100ExportLatestResponse> {
+  const { data } = await apiClient.get<Top100ExportLatestResponse>(
+    `/leaderboard/${competitionId}/exports/latest`,
+    { params: { target } },
   )
   return data
 }
@@ -157,14 +193,16 @@ export async function startBulkDownload(
 }
 
 // Download specific replay episodes by ID (e.g. a top performer's replays on the
-// Top 10% Replays page) — no submission ownership required.
+// Top 100 Replays page) — no submission ownership required.
 export async function startReplayDownload(
   episodeIds: string[],
   formatMode: FormatMode = 'zip',
+  archiveName?: string,
 ): Promise<StartDownloadResponse> {
   const { data } = await apiClient.post<StartDownloadResponse>('/downloads/replays', {
     episode_ids: episodeIds,
     format_mode: formatMode,
+    archive_name: archiveName,
   })
   return data
 }

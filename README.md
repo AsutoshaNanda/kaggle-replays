@@ -65,7 +65,8 @@ Studying replays is one of the best ways to improve a competition agent, but doi
 - List a submission's episodes with an automatically computed outcome (win, loss, or draw), derived from the agents' terminal rewards with zero extra fetches.
 - Bulk-download replays as JSON or ZIP, optionally filtered by outcome, with live progress streamed over a WebSocket.
 - View the current public leaderboard with a top-ten-percent cutoff, search, a "show all" toggle, and a competition selector.
-- "Top 10% Replays": daily leaderboard snapshots and the replay episode IDs of the top performers, captured on demand or on a schedule.
+- "Top 100 Replays": daily leaderboard snapshots with one player ZIP action and an episode count for each of ranks 1 through 100.
+- A standalone daily top-100 exporter that creates one resumable replay ZIP per player and date, stops at the competition deadline, reports each ZIP's episode count, and can upload completed ZIPs to Google Drive through `rclone`.
 - Read-only profile panel sourced from your Kaggle session, with a link out to Kaggle for edits.
 - A rate-limit-safe data layer with "last synced X ago" labels and manual "Sync now" controls.
 - Light and dark themes.
@@ -279,7 +280,7 @@ Key backend variables: `DATABASE_URL`, `JWT_SECRET` and `JWT_REFRESH_SECRET` (tw
 1. **Home** lists your competitions. Open one to see its submissions.
 2. **Submissions** shows each submission's score and episode count. Press **Sync now** to force a fresh pull from Kaggle; otherwise data is served from the local cache, and a "Last synced" label shows how fresh it is.
 3. **Leaderboard** (from the sidebar or a competition) shows the current public standings and the top-ten-percent cutoff, with a competition selector and search.
-4. **Top 10% Replays** shows dated leaderboard snapshots and the replay episode IDs of the top performers. Press **Sync now** to capture today's standings and the top performers' replays.
+4. **Top 100 Replays** shows dated leaderboard snapshots through the competition end date. Press **Sync top 100** to resolve every player's episode list, then create one ZIP per player and day.
 5. From a submission you can bulk-download replays (JSON or ZIP), optionally filtered by outcome, and watch live progress.
 
 ## Security model and deployment warning
@@ -346,13 +347,13 @@ A Vite/React/TypeScript SPA with an in-memory-only access token, a refresh-on-40
 
 **Submission scores showing 0.** For simulation competitions, `publicScoreFormatted` is `0`/empty; the real score is the agent skill rating (`updatedScore`) carried in the episode data. The fix sources the score from the latest episode's rating and treats `0`/empty as "unknown" (rendered as a dash) so a misleading `0` is never shown.
 
-**Leaderboard empty and Top 10% Replays history errors.** These shared one root cause. The frontend routes carry the Kaggle numeric competition id, and the submissions endpoint resolved by that id correctly, but the leaderboard routes resolved by the internal primary key — so they returned 404, which surfaced as an empty leaderboard and a "Could not load top-replay history" error (doubled by React StrictMode in development). The fix makes the leaderboard routes resolve by the Kaggle id and use the internal id only for snapshot relationships.
+**Leaderboard empty and Top 100 Replays history errors.** These shared one root cause. The frontend routes carry the Kaggle numeric competition id, and the submissions endpoint resolved by that id correctly, but the leaderboard routes resolved by the internal primary key — so they returned 404, which surfaced as an empty leaderboard and a "Could not load top-replay history" error (doubled by React StrictMode in development). The fix makes the leaderboard routes resolve by the Kaggle id and use the internal id only for snapshot relationships.
 
 **Login showing two "too many requests" popups.** React StrictMode double-invokes effects in development, so the auth bootstrap fired two `/auth/refresh` calls; when those hit the auth rate limit, the client showed two 429 toasts. The fix suppresses 429 toasts for auth endpoints (a throttled background refresh should fail silently to logged-out) and coalesces the bootstrap into a single shared refresh.
 
 **"Could not start the Kaggle login flow."** This one is operational, not a code bug: it appears when the backend process is not running (the frontend's login request is refused). Start the backend and it resolves.
 
-**Top 10% Replays showing only names.** The "Backfill" button reconstructed a degenerate single-team list from the user's own submissions, with no real team names and no episode IDs — which made the page redundant with the leaderboard. It was replaced with a real leaderboard capture that stores actual team names and, via the bounded resolver above, the top performers' replay episode IDs.
+**Top 100 Replays showing only names.** The resolver now covers ranks 1 through 100, saves progress after every player, pauses and retries on Kaggle rate limits, and exposes one named ZIP action with an episode count per player and day.
 
 **Episode counts showing 0 when rate-limited.** A throttled `ListEpisodes` response was once recorded as "0 episodes." The column was made nullable so an unknown count is distinct from a confirmed `0`, rendered as a dash, and filled in later by the background resolver.
 

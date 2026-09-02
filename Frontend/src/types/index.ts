@@ -64,6 +64,7 @@ export interface DownloadHistoryEntry {
   submission_title: string | null
   submission_score: number | null
   collection_name: string | null
+  archive_name: string | null
   created_at: string | null
   started_at: string | null
   completed_at: string | null
@@ -147,6 +148,8 @@ export interface TopPerformer {
   score: number | null
   best_submission_id: string | null
   episode_ids: string[]
+  episode_count: number
+  episodes_resolved: boolean
 }
 export interface LeaderboardDay {
   date: string
@@ -162,6 +165,30 @@ export interface LeaderboardSyncResponse {
   status: string
   mode: string
   message: string
+}
+export type Top100ExportTarget = 'kaggle_dataset' | 'google_drive'
+export interface Top100ExportJob {
+  job_id: string
+  target: Top100ExportTarget
+  status: string
+  public: boolean
+  total_players: number
+  resolved_players: number
+  completed_players: number
+  total_episodes: number
+  completed_episodes: number
+  current_rank: number | null
+  result_url: string | null
+  destination: string | null
+  error: string | null
+}
+export interface Top100ExportLatestResponse {
+  job: Top100ExportJob | null
+}
+export interface Top100ExportCapabilities {
+  kaggle_dataset_ready: boolean
+  google_drive_ready: boolean
+  google_drive_message: string
 }
 
 // --- Collections ---

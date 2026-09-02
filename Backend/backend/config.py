@@ -56,7 +56,11 @@ class Settings(BaseSettings):
     # --- Concurrency / lifecycle -------------------------------------------
     MAX_CONCURRENT_CONTEXTS: int = 10
     MAX_PARALLEL_DOWNLOAD_JOBS: int = 5
+    REPLAY_BATCH_MIN: int = 5
+    REPLAY_BATCH_SIZE: int = 20
+    REPLAY_BATCH_MAX: int = 40
     JOB_OUTPUT_TTL_HOURS: float = 0.25
+    GOOGLE_DRIVE_DESTINATION: str | None = None
 
     # --- Logging ------------------------------------------------------------
     LOG_LEVEL: str = "INFO"

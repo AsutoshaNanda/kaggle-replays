@@ -85,7 +85,7 @@ export function DownloadHistoryTable({
           const startedFull = job.started_at ? new Date(job.started_at).toLocaleString() : '—'
           const subTitle = isCollection
             ? (job.collection_name ?? 'Collection')
-            : (job.submission_title ?? '—')
+            : (job.archive_name ?? job.submission_title ?? '—')
           const scoreText =
             job.submission_score !== null && job.submission_score !== undefined
               ? job.submission_score.toFixed(1)

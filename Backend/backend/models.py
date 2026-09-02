@@ -227,6 +227,10 @@ class DownloadJob(Base):
     # Replay-by-id jobs only: explicit episode IDs to download (no owned
     # submission). NULL for submission-based and collection jobs.
     episode_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    archive_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    export_job_id: Mapped[int | None] = mapped_column(
+        UINT, ForeignKey("export_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # Single-item collection jobs only: the one CollectionItem.id to download
     # (NULL = whole-collection job driven by ``item_filter``). Plain int, not an
     # FK, so job history survives a collection re-sync that prunes stale items.
@@ -332,6 +336,7 @@ class LeaderboardEntry(Base):
     score: Mapped[float | None] = mapped_column(Float)
     is_top_10_percent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     best_submission_id: Mapped[str | None] = mapped_column(String(100))
+    episodes_resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     snapshot: Mapped["LeaderboardSnapshot"] = relationship(back_populates="entries")
     episodes: Mapped[list["TopPerformerEpisode"]] = relationship(
@@ -340,7 +345,7 @@ class LeaderboardEntry(Base):
 
 
 class TopPerformerEpisode(Base):
-    """An episode ID linked to a top-10% leaderboard entry."""
+    """An episode ID linked to a top-100 leaderboard entry."""
 
     __tablename__ = "top_performer_episodes"
     __table_args__ = (UniqueConstraint("entry_id", "episode_id", name="uk_entry_episode"),)
@@ -352,3 +357,36 @@ class TopPerformerEpisode(Base):
     episode_id: Mapped[str] = mapped_column(String(100), nullable=False)
 
     entry: Mapped["LeaderboardEntry"] = relationship(back_populates="episodes")
+
+
+class ExportJob(Base):
+    """A resumable top-100 export to Kaggle Dataset or Google Drive."""
+
+    __tablename__ = "export_jobs"
+
+    id: Mapped[int] = mapped_column(UINT, primary_key=True, autoincrement=True)
+    job_uuid: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(UINT, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    competition_id: Mapped[int] = mapped_column(
+        UINT, ForeignKey("competitions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    snapshot_id: Mapped[int | None] = mapped_column(
+        UINT, ForeignKey("leaderboard_snapshots.id", ondelete="SET NULL"), nullable=True
+    )
+    target: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued", index=True)
+    is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    total_players: Mapped[int] = mapped_column(UINT, nullable=False, default=100)
+    resolved_players: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    completed_players: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    total_episodes: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    completed_episodes: Mapped[int] = mapped_column(UINT, nullable=False, default=0)
+    current_rank: Mapped[int | None] = mapped_column(UINT)
+    download_job_ids: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    dataset_ref: Mapped[str | None] = mapped_column(String(200))
+    result_url: Mapped[str | None] = mapped_column(String(600))
+    destination: Mapped[str | None] = mapped_column(String(600))
+    error_msg: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime)

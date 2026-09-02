@@ -58,7 +58,7 @@ async def start_download(
 
 
 @router.post("/replays", response_model=DownloadStartResponse)
-@limiter.limit("10/hour")
+@limiter.limit("120/hour")
 async def download_replays(
     request: Request,
     body: ReplayDownloadRequest,
@@ -67,12 +67,12 @@ async def download_replays(
 ) -> DownloadStartResponse:
     """Download specific replay episodes by ID (no owned submission needed).
 
-    Powers the Top 10% Replays page: the episode IDs shown there belong to other
+    Powers the Top 100 Replays page: the episode IDs shown there belong to other
     teams' submissions, so they can't go through the submission-scoped path —
     replays fetch by id directly.
     """
     job = await download_service.create_replay_job(
-        db, current_user.id, body.episode_ids, body.format_mode
+        db, current_user.id, body.episode_ids, body.format_mode, body.archive_name
     )
     asyncio.create_task(run_download_job(job.job_uuid))
     await write_audit(
@@ -135,7 +135,7 @@ async def download_file(
     path = Path(job.output_path)
     if not str(path.resolve()).startswith(str(expected.parent.resolve())) or not path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Output file missing")
-    filename = f"{job_uuid}.zip"
+    filename = f"{job.archive_name or job_uuid}.zip"
     return StreamingResponse(
         stream_file(path),
         media_type="application/zip",
@@ -150,10 +150,12 @@ async def cancel_job(
     """Cancel an owned job and delete its output."""
     job = await download_service.get_owned_job(db, current_user.id, job_uuid)
     _ensure_owner(job, current_user.id)
+    was_running = job.status == "running"
     job.status = "cancelled"
-    if job.output_path:
-        delete_path(Path(job.output_path))
-    delete_path(safe_output_path(_settings.downloads_base_path, current_user.id, job_uuid))
+    if not was_running:
+        if job.output_path:
+            delete_path(Path(job.output_path))
+        delete_path(safe_output_path(_settings.downloads_base_path, current_user.id, job_uuid))
     await db.commit()
     await write_audit(
         db, action="download.cancel", ip_address=request.state.client_ip,
@@ -170,7 +172,7 @@ async def list_jobs(
     rows = (
         await db.execute(
             select(DownloadJob)
-            .where(DownloadJob.user_id == current_user.id)
+            .where(DownloadJob.user_id == current_user.id, DownloadJob.export_job_id.is_(None))
             .options(selectinload(DownloadJob.submission), selectinload(DownloadJob.collection))
             .order_by(DownloadJob.created_at.desc())
             .limit(50)

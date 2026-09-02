@@ -1,4 +1,4 @@
-"""Leaderboard sync worker: fetch → store snapshot → resolve top-10% episodes.
+"""Leaderboard sync worker: fetch → store snapshot → resolve top-100 episodes.
 
 Provides daily-sync and historical-backfill orchestration plus a midnight-UTC
 scheduler loop (pure asyncio, no new dependencies). The top-10% cutoff for a
@@ -12,7 +12,7 @@ import datetime as dt
 import json
 import math
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..kaggle_service import fetch_leaderboard, get_api_session, list_episodes_checked
@@ -83,8 +83,8 @@ async def store_snapshot(
 ) -> LeaderboardSnapshot:
     """Persist a snapshot + entries idempotently for one competition/day.
 
-    Re-running for the same ``(competition_id, snapshot_date)`` replaces the prior
-    snapshot's entries rather than duplicating them.
+    Re-running for the same ``(competition_id, snapshot_date)`` updates the prior
+    entries while preserving episode progress for unchanged submissions.
 
     Returns:
         The stored :class:`LeaderboardSnapshot`.
@@ -109,25 +109,36 @@ async def store_snapshot(
     snapshot.fetched_at = dt.datetime.now(dt.timezone.utc)
     await db.flush()
 
-    # Replace existing entries for idempotency.
-    for old in (
+    existing = (
         await db.execute(select(LeaderboardEntry).where(LeaderboardEntry.snapshot_id == snapshot.id))
-    ).scalars().all():
-        await db.delete(old)
-    await db.flush()
+    ).scalars().all()
+    existing_by_team = {entry.team_id: entry for entry in existing}
+    seen_team_ids: set[str] = set()
 
     for row in entries:
-        db.add(
-            LeaderboardEntry(
+        team_id = str(row["team_id"])
+        seen_team_ids.add(team_id)
+        entry = existing_by_team.get(team_id)
+        if entry is None:
+            entry = LeaderboardEntry(
                 snapshot_id=snapshot.id,
-                team_id=row["team_id"],
-                team_name=row.get("team_name"),
-                rank=row["rank"],
-                score=row.get("score"),
-                is_top_10_percent=row["rank"] <= cutoff,
-                best_submission_id=row.get("best_submission_id"),
+                team_id=team_id,
             )
-        )
+            db.add(entry)
+        elif entry.best_submission_id != row.get("best_submission_id"):
+            await db.execute(
+                delete(TopPerformerEpisode).where(TopPerformerEpisode.entry_id == entry.id)
+            )
+            entry.episodes_resolved_at = None
+        entry.team_name = row.get("team_name")
+        entry.rank = row["rank"]
+        entry.score = row.get("score")
+        entry.is_top_10_percent = row["rank"] <= cutoff
+        entry.best_submission_id = row.get("best_submission_id")
+
+    for entry in existing:
+        if entry.team_id not in seen_team_ids:
+            await db.delete(entry)
     await db.commit()
     _log.info(
         "leaderboard.snapshot_stored",
@@ -139,29 +150,26 @@ async def store_snapshot(
     return snapshot
 
 
-# How many top performers to resolve replay episode IDs for. The top 10% can be
-# hundreds of teams; resolving all of them would fire hundreds of ListEpisodes
-# calls and trip Kaggle's rate limit. We only need the best few, so this is
-# bounded and the calls below are paced.
-TOP_PERFORMER_EPISODE_LIMIT = 20
-_EPISODE_DELAY = 0.4  # seconds between sequential ListEpisodes calls
+TOP_PERFORMER_EPISODE_LIMIT = 100
+_EPISODE_DELAY = 1.0
+_RATE_LIMIT_BASE_DELAY = 30.0
+_RATE_LIMIT_MAX_DELAY = 300.0
+_SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 async def resolve_top_episodes(page, tokens, db: AsyncSession, snapshot_id: int) -> int:
     """Resolve + store replay episode IDs for the TOP-N performers in a snapshot.
 
-    This is what makes the "Top 10% Replays" page useful: each top performer gets
-    their actual replay episode IDs (not just a name). Bounded to the best
-    :data:`TOP_PERFORMER_EPISODE_LIMIT` ranks and PACED with a short delay between
-    calls, stopping on the first error/429 (a later sync resumes) so it never
-    storms Kaggle. Skips entries already resolved. Returns episode links added.
+    Resolves ranks 1 through 100 sequentially. Completed entries are skipped on
+    later runs. Kaggle rate limits pause the current run with exponential backoff
+    and retry the same player instead of losing progress.
     """
     entries = (
         await db.execute(
             select(LeaderboardEntry)
             .where(
                 LeaderboardEntry.snapshot_id == snapshot_id,
-                LeaderboardEntry.is_top_10_percent.is_(True),
+                LeaderboardEntry.rank <= TOP_PERFORMER_EPISODE_LIMIT,
             )
             .order_by(LeaderboardEntry.rank.asc())
             .limit(TOP_PERFORMER_EPISODE_LIMIT)
@@ -170,34 +178,82 @@ async def resolve_top_episodes(page, tokens, db: AsyncSession, snapshot_id: int)
 
     added = 0
     for entry in entries:
-        if not entry.best_submission_id:
+        if entry.episodes_resolved_at is not None:
             continue
-        already = (
+        if not entry.best_submission_id:
+            entry.episodes_resolved_at = dt.datetime.now(dt.timezone.utc)
+            await db.commit()
+            continue
+        existing_episode = (
             await db.execute(
                 select(TopPerformerEpisode).where(TopPerformerEpisode.entry_id == entry.id)
             )
         ).first()
-        if already:
+        if existing_episode:
+            entry.episodes_resolved_at = dt.datetime.now(dt.timezone.utc)
+            await db.commit()
             continue
-        episodes, error = await list_episodes_checked(page, tokens, entry.best_submission_id)
-        if error is not None:
-            _log.warning("leaderboard.episodes_stopped", snapshot_id=snapshot_id, reason=error)
-            break  # likely 429 / expired session — stop; a later sync resumes
+
+        rate_limit_attempt = 0
+        while True:
+            episodes, error = await list_episodes_checked(page, tokens, entry.best_submission_id)
+            if error is None:
+                break
+            if not _is_rate_limit(error):
+                _log.warning("leaderboard.episodes_stopped", snapshot_id=snapshot_id, reason=error)
+                return added
+            delay = min(_RATE_LIMIT_MAX_DELAY, _RATE_LIMIT_BASE_DELAY * (2**rate_limit_attempt))
+            rate_limit_attempt += 1
+            _log.warning(
+                "leaderboard.rate_limited",
+                snapshot_id=snapshot_id,
+                rank=entry.rank,
+                retry_in_seconds=delay,
+            )
+            await asyncio.sleep(delay)
+
         for ep in episodes:
             db.add(TopPerformerEpisode(entry_id=entry.id, episode_id=str(ep["id"])))
             added += 1
+        entry.episodes_resolved_at = dt.datetime.now(dt.timezone.utc)
         await db.commit()
         await asyncio.sleep(_EPISODE_DELAY)
     return added
 
 
-async def run_daily_sync(competition_id: int, db_factory, session_manager) -> None:
-    """Orchestrate fetch → store → resolve for ``competition_id`` for today (UTC)."""
+def sync_is_running(competition_id: int) -> bool:
+    lock = _SYNC_LOCKS.get(competition_id)
+    return bool(lock and lock.locked())
+
+
+async def run_daily_sync(
+    competition_id: int,
+    db_factory,
+    session_manager,
+    final_only: bool = False,
+) -> bool:
+    lock = _SYNC_LOCKS.setdefault(competition_id, asyncio.Lock())
+    if lock.locked():
+        _log.info("leaderboard.sync_already_running", competition_id=competition_id)
+        return False
+    async with lock:
+        await _run_daily_sync(competition_id, db_factory, session_manager, final_only)
+    return True
+
+
+async def _run_daily_sync(
+    competition_id: int,
+    db_factory,
+    session_manager,
+    final_only: bool,
+) -> None:
+    """Orchestrate fetch → store → resolve through the competition end date."""
     today = dt.datetime.now(dt.timezone.utc).date()
     async with db_factory() as db:
         comp = (await db.execute(select(Competition).where(Competition.id == competition_id))).scalar_one_or_none()
         if comp is None:
             return
+        snapshot_date = min(today, _aware(comp.deadline).date()) if comp.deadline else today
         # Shared persistent page (session_manager param kept for signature
         # compatibility; get_api_session uses the same singleton internally).
         page, tokens = await get_api_session(comp.user_id)
@@ -205,8 +261,21 @@ async def run_daily_sync(competition_id: int, db_factory, session_manager) -> No
         if not entries:
             _log.warning("leaderboard.empty", competition_id=competition_id)
             return
-        snapshot = await store_snapshot(db, competition_id, today, entries)
-        await resolve_top_episodes(page, tokens, db, snapshot.id)
+        await store_snapshot(db, competition_id, snapshot_date, entries)
+        snapshots = (
+            await db.execute(
+                select(LeaderboardSnapshot)
+                .where(
+                    LeaderboardSnapshot.competition_id == competition_id,
+                    LeaderboardSnapshot.snapshot_date <= snapshot_date,
+                )
+                .order_by(LeaderboardSnapshot.snapshot_date.desc())
+            )
+        ).scalars().all()
+        if final_only:
+            snapshots = snapshots[:1]
+        for snapshot in snapshots:
+            await resolve_top_episodes(page, tokens, db, snapshot.id)
 
 
 async def backfill(competition_id: int, start_date: dt.date, end_date: dt.date, db_factory, session_manager) -> None:
@@ -220,6 +289,8 @@ async def backfill(competition_id: int, start_date: dt.date, end_date: dt.date, 
         comp = (await db.execute(select(Competition).where(Competition.id == competition_id))).scalar_one_or_none()
         if comp is None:
             return
+        if comp.deadline:
+            end_date = min(end_date, _aware(comp.deadline).date())
         subs = (
             await db.execute(select(Submission).where(Submission.competition_id == competition_id))
         ).scalars().all()
@@ -310,3 +381,8 @@ def _opt_str(value) -> str | None:
 def _aware(value: dt.datetime) -> dt.datetime:
     """Coerce a naive datetime to UTC-aware."""
     return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+
+
+def _is_rate_limit(error: str) -> bool:
+    value = error.lower()
+    return "429" in value or "rate limit" in value or "rate-limit" in value

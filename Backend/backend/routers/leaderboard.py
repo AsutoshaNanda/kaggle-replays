@@ -1,4 +1,4 @@
-"""Leaderboard endpoints: daily history, per-day top-10% replays, sync trigger.
+"""Leaderboard endpoints: daily history, per-day top-100 replays, sync trigger.
 
 All endpoints are JWT-protected and validate that the competition belongs to the
 requesting user. ``history`` returns an empty ``days`` list (never 500) when no
@@ -19,6 +19,7 @@ from ..database import AsyncSessionLocal
 from ..dependencies import get_current_user, get_db, limiter
 from ..models import (
     Competition,
+    ExportJob,
     LeaderboardEntry,
     LeaderboardSnapshot,
     TopPerformerEpisode,
@@ -33,10 +34,14 @@ from ..schemas import (
     LeaderboardRow,
     LeaderboardSyncRequest,
     LeaderboardSyncResponse,
+    Top100ExportCapabilities,
+    Top100ExportJob,
+    Top100ExportLatestResponse,
+    Top100ExportRequest,
     TopPerformer,
 )
 from ..session_manager import get_session_manager
-from ..tasks import leaderboard_worker
+from ..tasks import export_worker, leaderboard_worker
 from ..utils.cache import episode_cache
 
 router = APIRouter(prefix="/leaderboard", tags=["leaderboard"])
@@ -62,17 +67,18 @@ async def _owned_competition(db: AsyncSession, user_id: int, competition_id: int
     return comp
 
 
-async def _recently_synced(db: AsyncSession, competition_id: int) -> bool:
+async def _recently_synced(db: AsyncSession, competition: Competition) -> bool:
     """True if today's snapshot for this competition was captured very recently.
 
     Used to debounce rapid "Sync now" clicks so we don't stack background jobs.
     """
     today = dt.datetime.now(dt.timezone.utc).date()
+    snapshot_date = min(today, _deadline_date(competition)) if competition.deadline else today
     snap = (
         await db.execute(
             select(LeaderboardSnapshot).where(
-                LeaderboardSnapshot.competition_id == competition_id,
-                LeaderboardSnapshot.snapshot_date == today,
+                LeaderboardSnapshot.competition_id == competition.id,
+                LeaderboardSnapshot.snapshot_date == snapshot_date,
             )
         )
     ).scalar_one_or_none()
@@ -82,23 +88,49 @@ async def _recently_synced(db: AsyncSession, competition_id: int) -> bool:
     return (dt.datetime.now(dt.timezone.utc) - fetched).total_seconds() < _SYNC_DEBOUNCE_SECONDS
 
 
+async def _has_unresolved_top100(db: AsyncSession, competition: Competition) -> bool:
+    deadline = _deadline_date(competition) if competition.deadline else dt.datetime.now(dt.timezone.utc).date()
+    unresolved = (
+        await db.execute(
+            select(LeaderboardEntry.id)
+            .join(LeaderboardSnapshot, LeaderboardEntry.snapshot_id == LeaderboardSnapshot.id)
+            .where(
+                LeaderboardSnapshot.competition_id == competition.id,
+                LeaderboardSnapshot.snapshot_date <= deadline,
+                LeaderboardEntry.rank <= 100,
+                LeaderboardEntry.episodes_resolved_at.is_(None),
+            )
+            .limit(1)
+        )
+    ).first()
+    return unresolved is not None
+
+
 async def _top_performers(db: AsyncSession, snapshot_id: int) -> list[TopPerformer]:
-    """Build the top-10% performer DTOs (with episode IDs) for a snapshot."""
+    """Build the top-100 performer DTOs with episode counts for a snapshot."""
     entries = (
         await db.execute(
             select(LeaderboardEntry)
-            .where(LeaderboardEntry.snapshot_id == snapshot_id, LeaderboardEntry.is_top_10_percent.is_(True))
+            .where(LeaderboardEntry.snapshot_id == snapshot_id, LeaderboardEntry.rank <= 100)
             .order_by(LeaderboardEntry.rank.asc())
-            .limit(50)  # the page shows the best performers; keep the payload small
+            .limit(100)
         )
     ).scalars().all()
+    ids_by_entry: dict[int, list[str]] = {entry.id: [] for entry in entries}
+    if ids_by_entry:
+        episode_rows = (
+            await db.execute(
+                select(TopPerformerEpisode.entry_id, TopPerformerEpisode.episode_id).where(
+                    TopPerformerEpisode.entry_id.in_(ids_by_entry)
+                )
+            )
+        ).all()
+        for entry_id, episode_id in episode_rows:
+            ids_by_entry[entry_id].append(episode_id)
+
     performers = []
     for entry in entries:
-        episode_ids = (
-            await db.execute(
-                select(TopPerformerEpisode.episode_id).where(TopPerformerEpisode.entry_id == entry.id)
-            )
-        ).scalars().all()
+        episode_ids = ids_by_entry[entry.id]
         performers.append(
             TopPerformer(
                 team_id=entry.team_id,
@@ -106,7 +138,9 @@ async def _top_performers(db: AsyncSession, snapshot_id: int) -> list[TopPerform
                 rank=entry.rank,
                 score=entry.score,
                 best_submission_id=entry.best_submission_id,
-                episode_ids=list(episode_ids),
+                episode_ids=episode_ids,
+                episode_count=len(episode_ids),
+                episodes_resolved=entry.episodes_resolved_at is not None or bool(episode_ids),
             )
         )
     return performers
@@ -124,6 +158,9 @@ async def history(
 ) -> LeaderboardHistoryResponse:
     """Return daily snapshots (optionally date-bounded); empty list if none."""
     comp = await _owned_competition(db, current_user.id, competition_id)
+    deadline = _deadline_date(comp) if comp.deadline else None
+    if deadline and (to_date is None or to_date > deadline):
+        to_date = deadline
     query = select(LeaderboardSnapshot).where(LeaderboardSnapshot.competition_id == comp.id)
     if from_date:
         query = query.where(LeaderboardSnapshot.snapshot_date >= from_date)
@@ -187,8 +224,10 @@ async def date_replays(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> LeaderboardReplaysResponse:
-    """Return the top-10% teams + their episode IDs for a specific date."""
+    """Return the top-100 teams and their episode IDs for a specific date."""
     comp = await _owned_competition(db, current_user.id, competition_id)
+    if comp.deadline and date > _deadline_date(comp):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Date is after competition end")
     snapshot = (
         await db.execute(
             select(LeaderboardSnapshot).where(
@@ -216,7 +255,7 @@ _SYNC_DEBOUNCE_SECONDS = 90
 
 
 @router.post("/{competition_id}/sync", response_model=LeaderboardSyncResponse)
-@limiter.limit("1/minute")
+@limiter.limit("30/minute")
 async def sync(
     request: Request,
     competition_id: int,
@@ -231,16 +270,24 @@ async def sync(
     if body.backfill:
         start = body.from_date or (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=7))
         end = body.to_date or dt.datetime.now(dt.timezone.utc).date()
+        if comp.deadline:
+            end = min(end, _deadline_date(comp))
         asyncio.create_task(
             leaderboard_worker.backfill(comp.id, start, end, AsyncSessionLocal, manager)
         )
         mode, message = "backfill", f"Backfill scheduled from {start} to {end}"
     else:
+        if leaderboard_worker.sync_is_running(comp.id):
+            return LeaderboardSyncResponse(
+                status="skipped",
+                mode="sync",
+                message="Top 100 sync is already running. Refresh to see progress.",
+            )
         # Debounce: if today's snapshot was captured moments ago, skip spawning a
         # duplicate background job (prevents accidental rapid re-clicks from
         # stacking work or burning the rate limit).
-        recent = await _recently_synced(db, comp.id)
-        if recent:
+        recent = await _recently_synced(db, comp)
+        if recent and not await _has_unresolved_top100(db, comp):
             return LeaderboardSyncResponse(
                 status="skipped", mode="sync", message="Already synced moments ago — refresh to see results."
             )
@@ -255,3 +302,88 @@ async def sync(
         detail={"mode": mode},
     )
     return LeaderboardSyncResponse(status="scheduled", mode=mode, message=message)
+
+
+def _deadline_date(comp: Competition) -> dt.date:
+    deadline = comp.deadline
+    if deadline is None:
+        return dt.datetime.now(dt.timezone.utc).date()
+    aware = deadline if deadline.tzinfo else deadline.replace(tzinfo=dt.timezone.utc)
+    return aware.date()
+
+
+@router.get("/{competition_id}/export-capabilities", response_model=Top100ExportCapabilities)
+async def export_capabilities(
+    competition_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Top100ExportCapabilities:
+    await _owned_competition(db, current_user.id, competition_id)
+    drive_ready = export_worker.drive_ready()
+    return Top100ExportCapabilities(
+        kaggle_dataset_ready=export_worker.kaggle_ready(),
+        google_drive_ready=drive_ready,
+        google_drive_message=(
+            "Google Drive is ready"
+            if drive_ready
+            else "Install rclone, run rclone config, and set GOOGLE_DRIVE_DESTINATION"
+        ),
+    )
+
+
+@router.post("/{competition_id}/exports", response_model=Top100ExportJob)
+@limiter.limit("5/hour")
+async def start_export(
+    request: Request,
+    competition_id: int,
+    body: Top100ExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Top100ExportJob:
+    comp = await _owned_competition(db, current_user.id, competition_id)
+    if body.target == "google_drive" and not export_worker.drive_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google Drive needs rclone, rclone config, and GOOGLE_DRIVE_DESTINATION",
+        )
+    if body.target == "kaggle_dataset" and not export_worker.kaggle_ready():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Kaggle CLI is not installed")
+    job = await export_worker.create_export_job(current_user.id, comp.id, body.target, body.public)
+    await write_audit(
+        db,
+        action="leaderboard.export",
+        ip_address=request.state.client_ip,
+        status="success",
+        user_id=current_user.id,
+        resource_type="export_job",
+        resource_id=job.job_uuid,
+        detail={"target": body.target, "public": body.public},
+    )
+    return Top100ExportJob(**export_worker.export_view(job))
+
+
+@router.get("/{competition_id}/exports/latest", response_model=Top100ExportLatestResponse)
+async def latest_export(
+    competition_id: int,
+    target: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Top100ExportLatestResponse:
+    if target not in ("kaggle_dataset", "google_drive"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid export target")
+    comp = await _owned_competition(db, current_user.id, competition_id)
+    job = (
+        await db.execute(
+            select(ExportJob)
+            .where(
+                ExportJob.user_id == current_user.id,
+                ExportJob.competition_id == comp.id,
+                ExportJob.target == target,
+            )
+            .order_by(ExportJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return Top100ExportLatestResponse(
+        job=Top100ExportJob(**export_worker.export_view(job)) if job else None
+    )

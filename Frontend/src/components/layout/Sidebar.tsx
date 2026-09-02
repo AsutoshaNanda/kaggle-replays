@@ -14,7 +14,7 @@ interface SidebarLink {
 const LINKS: SidebarLink[] = [
   { to: '/competitions', label: 'Home', Icon: ChartIcon, end: true },
   { to: '/leaderboard', label: 'Leaderboard', Icon: TrophyIcon },
-  { to: '/top-replays', label: 'Top 10% Replays', Icon: TargetIcon },
+  { to: '/top-replays', label: 'Top 100 Replays', Icon: TargetIcon },
   { to: '/collections', label: 'Collections', Icon: PackageIcon },
   { to: '/downloads', label: 'My Downloads', Icon: DownloadIcon },
 ]
