@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..config import get_settings
 from ..database import AsyncSessionLocal
@@ -226,7 +227,7 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
     mappings = dict(job.download_job_ids or {})
     if job.target == "kaggle_dataset":
         _merge_progress_state(mappings, _read_progress(stage / "progress.json"))
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         await db.commit()
     manifest: list[dict] = []
     completed_players = 0
@@ -247,11 +248,16 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
                 source = Path(download.output_path or "")
                 if download.status != "done" or not source.is_file():
                     raise RuntimeError(download.error_msg or f"Rank {player['rank']} ZIP failed")
-                shutil.copy2(source, archive)
-                included = _zip_json_count(archive)
+                included = _zip_json_count(source)
                 if included is None:
                     raise RuntimeError(f"Rank {player['rank']} ZIP validation failed")
                 failed = download.failed_count
+                if job.target == "kaggle_dataset":
+                    source.replace(archive)
+                    _cleanup_download_output(download, source)
+                    await db.commit()
+                else:
+                    shutil.copy2(source, archive)
         completed_players += 1
         completed_episodes += included
         manifest.append(
@@ -270,7 +276,7 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
         job.completed_players = completed_players
         job.completed_episodes = completed_episodes
         job.current_rank = players[index + 1]["rank"] if index + 1 < len(players) else None
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         await db.commit()
         _write_manifest(stage / "manifest.csv", manifest)
 
@@ -306,7 +312,10 @@ async def _run_player_download(db, export: ExportJob, mappings: dict, player: di
     if (
         download is None
         or download.status in ("failed", "cancelled")
-        or (download.status == "done" and not download.output_path)
+        or (
+            download.status == "done"
+            and (not download.output_path or not Path(download.output_path).is_file())
+        )
     ):
         download = await create_replay_job(
             db,
@@ -317,7 +326,7 @@ async def _run_player_download(db, export: ExportJob, mappings: dict, player: di
             export.id,
         )
         mappings[key] = download.job_uuid
-        export.download_job_ids = mappings
+        _store_mappings(export, mappings)
         await db.commit()
     if download.status != "done":
         await run_download_job(download.job_uuid)
@@ -352,6 +361,8 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
     result_url = f"https://www.kaggle.com/datasets/{dataset_ref}"
 
     status = await _kaggle_status(kaggle, dataset_ref)
+    if status == "ready":
+        shutil.rmtree(stage / _KAGGLE_UPLOAD_DIR, ignore_errors=True)
     if status is None and known_dataset:
         for _ in range(12):
             await asyncio.sleep(_KAGGLE_STATUS_POLL_SECONDS)
@@ -366,7 +377,7 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
         job.status = "uploading"
         state.update({"published_players": 0, "version": 1, "status": "pending", "confirmed": False})
         mappings[_KAGGLE_STATE_KEY] = state
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         job.dataset_ref = dataset_ref
         job.result_url = result_url
         _write_progress(stage / "progress.json", job, state, "Publishing")
@@ -376,12 +387,13 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
         if job.is_public:
             command.append("--public")
         code, output = await _process(*command)
+        shutil.rmtree(publish_dir, ignore_errors=True)
         if code != 0:
             status = await _kaggle_status(kaggle, dataset_ref)
             if status is None:
                 state["status"] = "error"
                 mappings[_KAGGLE_STATE_KEY] = state
-                job.download_job_ids = mappings
+                _store_mappings(job, mappings)
                 _write_progress(stage / "progress.json", job, state, "Publishing")
                 await db.commit()
                 raise RuntimeError(f"Kaggle dataset creation failed: {output}")
@@ -390,7 +402,7 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
         state["confirmed"] = True
         state["status"] = status
         mappings[_KAGGLE_STATE_KEY] = state
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         job.dataset_ref = dataset_ref
         job.result_url = result_url
         _write_progress(stage / "progress.json", job, state, "Publishing")
@@ -413,7 +425,7 @@ async def _ensure_kaggle_dataset(db, job, user, competition, day: dt.date, stage
         state["version"] = 1
     state["status"] = status
     mappings[_KAGGLE_STATE_KEY] = state
-    job.download_job_ids = mappings
+    _store_mappings(job, mappings)
     job.status = "waiting_for_replays"
     _write_progress(stage / "progress.json", job, state, "Downloading")
     await db.commit()
@@ -458,10 +470,11 @@ async def _publish_kaggle_version(
         "-r",
         "skip",
     )
+    shutil.rmtree(publish_dir, ignore_errors=True)
     if code != 0:
         state["status"] = "error"
         mappings[_KAGGLE_STATE_KEY] = state
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         _write_progress(stage / "progress.json", job, state, "Publishing")
         await db.commit()
         raise RuntimeError(f"Kaggle dataset version failed: {output}")
@@ -469,7 +482,7 @@ async def _publish_kaggle_version(
     state = next_state
     state["confirmed"] = True
     mappings[_KAGGLE_STATE_KEY] = state
-    job.download_job_ids = mappings
+    _store_mappings(job, mappings)
     job.status = "downloading"
     _write_progress(stage / "progress.json", job, state, "Downloading")
     await db.commit()
@@ -485,20 +498,20 @@ async def _wait_for_kaggle_ready(db, job: ExportJob, stage: Path, mappings: dict
         if status == "ready":
             state["status"] = "ready"
             mappings[_KAGGLE_STATE_KEY] = state
-            job.download_job_ids = mappings
+            _store_mappings(job, mappings)
             _write_progress(stage / "progress.json", job, state, "Publishing" if job.status == "uploading" else "Downloading")
             await db.commit()
             return
         if status == "error":
             state["status"] = "error"
             mappings[_KAGGLE_STATE_KEY] = state
-            job.download_job_ids = mappings
+            _store_mappings(job, mappings)
             _write_progress(stage / "progress.json", job, state, "Publishing")
             await db.commit()
             raise RuntimeError("Kaggle dataset entered error status")
         state["status"] = "pending"
         mappings[_KAGGLE_STATE_KEY] = state
-        job.download_job_ids = mappings
+        _store_mappings(job, mappings)
         _write_progress(stage / "progress.json", job, state, "Publishing" if job.status == "uploading" else "Downloading")
         await db.commit()
         await asyncio.sleep(_KAGGLE_STATUS_POLL_SECONDS)
@@ -753,6 +766,20 @@ def _kaggle_state(mappings: dict) -> dict:
 
 
 
+def _store_mappings(job: ExportJob, mappings: dict) -> None:
+    """Persist JSON mapping changes even when the same dict was mutated in place."""
+    job.download_job_ids = dict(mappings)
+    flag_modified(job, "download_job_ids")
+
+
+def _cleanup_download_output(download: DownloadJob, source: Path) -> None:
+    """Remove the empty per-download directory after its ZIP was moved into the export."""
+    download_dir = source.parent / source.stem
+    if download_dir.is_dir():
+        shutil.rmtree(download_dir, ignore_errors=True)
+    download.output_path = None
+
+
 def _refresh_kaggle_publish_dir(stage: Path, manifest: list[dict]) -> Path:
     publish_dir = stage / _KAGGLE_UPLOAD_DIR
     if publish_dir.exists():
@@ -766,7 +793,11 @@ def _refresh_kaggle_publish_dir(stage: Path, manifest: list[dict]) -> Path:
         source = stage / row["zip_file"]
         if not source.is_file():
             raise RuntimeError(f"Missing prepared ZIP: {source.name}")
-        shutil.copy2(source, publish_dir / source.name)
+        destination = publish_dir / source.name
+        try:
+            destination.hardlink_to(source)
+        except OSError as exc:
+            raise RuntimeError(f"Could not create zero-copy Kaggle staging link for {source.name}") from exc
     return publish_dir
 
 
