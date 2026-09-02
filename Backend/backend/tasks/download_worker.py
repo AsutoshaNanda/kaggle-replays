@@ -209,6 +209,9 @@ async def _download_replays(
     existing = {path.stem for path in out_dir.glob("*.json")}
     completed = sum(1 for episode_id in wanted if episode_id in existing)
     failed = 0
+
+    def _write_one(filepath, text: str) -> None:
+        filepath.write_text(text, encoding="utf-8")
     pending = [episode_id for episode_id in wanted if episode_id not in existing]
     rate_limit_round = 0
     batch_size = _BATCH_START
@@ -240,10 +243,8 @@ async def _download_replays(
                     hit_retryable = True
                     hit_429 = hit_429 or status == 429
                 else:
-                    if status == 429:
-                        hit_429 = True
-                    _log.warning("Replay fetch failed, scheduling retry", episode_id=eid, status=status, attempt=attempt)
-                    to_retry.append(eid)
+                    failed += 1
+                    _log.warning("Replay fetch failed", episode_id=eid, status=status)
                 job.latest_episode_id = eid
             kaggle_throttle.record(429 if hit_429 else 200)
             if hit_429:
