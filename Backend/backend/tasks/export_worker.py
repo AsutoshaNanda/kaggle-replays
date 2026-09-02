@@ -224,20 +224,58 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
     job.status = "downloading"
     job.total_episodes = sum(len(player["episode_ids"]) for player in players)
     await db.commit()
+
     mappings = dict(job.download_job_ids or {})
-    if job.target == "kaggle_dataset":
-        _merge_progress_state(mappings, _read_progress(stage / "progress.json"))
-        _store_mappings(job, mappings)
-        await db.commit()
     manifest: list[dict] = []
     completed_players = 0
     completed_episodes = 0
+    published_players = 0
+
+    if job.target == "kaggle_dataset":
+        _merge_progress_state(mappings, _read_progress(stage / "progress.json"))
+        state = _kaggle_state(mappings)
+        published_players = min(len(players), int(state.get("published_players", 0)))
+
+        # Published batches may already have been deleted locally. Preserve their
+        # manifest rows, but never recreate their ZIPs.
+        existing_manifest = _read_manifest(stage / "manifest.csv")
+        existing_by_rank: dict[int, dict] = {}
+        for row in existing_manifest:
+            try:
+                existing_by_rank[int(row.get("rank", 0))] = row
+            except (TypeError, ValueError):
+                continue
+        for player in players[:published_players]:
+            row = existing_by_rank.get(int(player["rank"]))
+            if row is not None:
+                manifest.append(row)
+
+        completed_players = published_players
+        completed_episodes = sum(
+            int(row.get("included_episodes", 0) or 0)
+            for row in manifest
+        )
+        job.completed_players = completed_players
+        job.completed_episodes = completed_episodes
+        job.current_rank = (
+            players[published_players]["rank"]
+            if published_players < len(players)
+            else None
+        )
+        _store_mappings(job, mappings)
+        await db.commit()
+        _write_manifest(stage / "manifest.csv", manifest)
+
     for index, player in enumerate(players):
+        if job.target == "kaggle_dataset" and index < published_players:
+            continue
+
         job.current_rank = player["rank"]
         name = _archive_name(snapshot.snapshot_date, player)
         archive = stage / f"{name}.zip"
         included = _zip_json_count(archive)
         failed = 0
+
         if included is None:
             if not player["episode_ids"]:
                 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED):
@@ -258,6 +296,7 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
                     await db.commit()
                 else:
                     shutil.copy2(source, archive)
+
         completed_players += 1
         completed_episodes += included
         manifest.append(
@@ -295,6 +334,7 @@ async def _prepare_archives(db, job: ExportJob, snapshot, players: list[dict], s
                     manifest,
                     completed_players,
                 )
+
     job.current_rank = None
     await db.commit()
 
@@ -441,10 +481,21 @@ async def _publish_kaggle_version(
 ) -> None:
     job.status = "uploading"
     await db.commit()
+
+    # Never start the next version while the previous one is still processing.
     await _wait_for_kaggle_ready(db, job, stage, mappings)
     state = _kaggle_state(mappings)
     if prepared_players <= int(state.get("published_players", 0)):
         return
+
+    # Each Kaggle version contains ONLY the newest 5-player batch. Older batches
+    # stay in Kaggle version history and are deleted locally once this one is READY.
+    batch_manifest = manifest[-_KAGGLE_VERSION_BATCH:]
+    if len(batch_manifest) != _KAGGLE_VERSION_BATCH:
+        raise RuntimeError(
+            f"Expected {_KAGGLE_VERSION_BATCH} prepared players for Kaggle batch, "
+            f"found {len(batch_manifest)}"
+        )
 
     next_state = {
         "published_players": prepared_players,
@@ -452,9 +503,11 @@ async def _publish_kaggle_version(
         "status": "pending",
         "confirmed": False,
     }
+
+    # Keep the local manifest cumulative, but stage only this 5-player batch.
     _write_manifest(stage / "manifest.csv", manifest)
     _write_progress(stage / "progress.json", job, next_state, "Publishing")
-    publish_dir = _refresh_kaggle_publish_dir(stage, manifest)
+    publish_dir = _refresh_kaggle_publish_dir(stage, batch_manifest)
     await db.commit()
 
     kaggle = _kaggle_cli()
@@ -470,7 +523,10 @@ async def _publish_kaggle_version(
         "-r",
         "skip",
     )
+
+    # The CLI has finished reading/uploading these files, so staging can go now.
     shutil.rmtree(publish_dir, ignore_errors=True)
+
     if code != 0:
         state["status"] = "error"
         mappings[_KAGGLE_STATE_KEY] = state
@@ -479,10 +535,18 @@ async def _publish_kaggle_version(
         await db.commit()
         raise RuntimeError(f"Kaggle dataset version failed: {output}")
 
-    state = next_state
-    state["confirmed"] = True
-    mappings[_KAGGLE_STATE_KEY] = state
+    next_state["confirmed"] = True
+    mappings[_KAGGLE_STATE_KEY] = next_state
     _store_mappings(job, mappings)
+    job.status = "uploading"
+    _write_progress(stage / "progress.json", job, next_state, "Publishing")
+    await db.commit()
+
+    # Only after Kaggle reports READY is it safe to delete this batch locally.
+    await _wait_for_kaggle_ready(db, job, stage, mappings)
+    _delete_published_archives(stage, batch_manifest)
+
+    state = _kaggle_state(mappings)
     job.status = "downloading"
     _write_progress(stage / "progress.json", job, state, "Downloading")
     await db.commit()
@@ -739,6 +803,17 @@ def _read_progress(path: Path) -> dict:
     }
 
 
+
+def _read_manifest(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    except (OSError, csv.Error):
+        return []
+
+
 def _merge_progress_state(mappings: dict, progress: dict) -> None:
     state = _kaggle_state(mappings)
     if progress:
@@ -780,15 +855,32 @@ def _cleanup_download_output(download: DownloadJob, source: Path) -> None:
     download.output_path = None
 
 
+
+def _delete_published_archives(stage: Path, manifest: list[dict]) -> None:
+    # Delete only ZIPs whose Kaggle batch has reached READY.
+    for row in manifest:
+        filename = str(row.get("zip_file") or "")
+        if not filename:
+            continue
+        archive = stage / filename
+        if archive.is_file():
+            archive.unlink()
+    shutil.rmtree(stage / _KAGGLE_UPLOAD_DIR, ignore_errors=True)
+
+
 def _refresh_kaggle_publish_dir(stage: Path, manifest: list[dict]) -> Path:
     publish_dir = stage / _KAGGLE_UPLOAD_DIR
     if publish_dir.exists():
         shutil.rmtree(publish_dir)
     publish_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("dataset-metadata.json", "manifest.csv", "progress.json"):
+
+    # The upload manifest describes only the files present in this Kaggle version.
+    for filename in ("dataset-metadata.json", "progress.json"):
         source = stage / filename
         if source.is_file():
             shutil.copy2(source, publish_dir / filename)
+    _write_manifest(publish_dir / "manifest.csv", manifest)
+
     for row in manifest:
         source = stage / row["zip_file"]
         if not source.is_file():
@@ -797,7 +889,9 @@ def _refresh_kaggle_publish_dir(stage: Path, manifest: list[dict]) -> Path:
         try:
             destination.hardlink_to(source)
         except OSError as exc:
-            raise RuntimeError(f"Could not create zero-copy Kaggle staging link for {source.name}") from exc
+            raise RuntimeError(
+                f"Could not create zero-copy Kaggle staging link for {source.name}"
+            ) from exc
     return publish_dir
 
 
