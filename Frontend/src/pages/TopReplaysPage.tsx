@@ -4,6 +4,8 @@ import {
   getLatestTop100Export,
   getLeaderboardHistory,
   getTop100ExportCapabilities,
+  pauseTop100Export,
+  resumeTop100Export,
   startReplayDownload,
   startTop100Export,
   syncLeaderboard,
@@ -33,12 +35,17 @@ const ACTIVE_EXPORT_STATUSES = new Set([
   'queued',
   'waiting_for_replays',
   'downloading',
+  'waiting_for_rate_limit',
   'uploading',
+  'paused',
 ])
 
 interface ExportProgressProps {
   label: string
   job: Top100ExportJob
+  onPause: () => void
+  onResume: () => void
+  controlling: boolean
 }
 
 export function TopReplaysPage(): JSX.Element {
@@ -58,6 +65,7 @@ export function TopReplaysPage(): JSX.Element {
   const [kaggleExport, setKaggleExport] = useState<Top100ExportJob | null>(null)
   const [driveExport, setDriveExport] = useState<Top100ExportJob | null>(null)
   const [startingExport, setStartingExport] = useState<Top100ExportTarget | null>(null)
+  const [controllingExport, setControllingExport] = useState<string | null>(null)
 
   useEffect(() => {
     if (activeId === null) {
@@ -184,6 +192,33 @@ export function TopReplaysPage(): JSX.Element {
     }
   }
 
+  const handleExportControl = async (
+    job: Top100ExportJob,
+    action: 'pause' | 'resume',
+  ): Promise<void> => {
+    if (activeId === null) return
+    setControllingExport(job.job_id)
+    try {
+      const updated =
+        action === 'pause'
+          ? await pauseTop100Export(activeId, job.job_id)
+          : await resumeTop100Export(activeId, job.job_id)
+      if (updated.target === 'kaggle_dataset') setKaggleExport(updated)
+      else setDriveExport(updated)
+      notify(
+        'success',
+        action === 'pause'
+          ? 'Export paused. Completed replay files and ZIPs are kept.'
+          : 'Export resumed from saved progress.',
+      )
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      notify('error', detail ?? `Could not ${action} this export.`)
+    } finally {
+      setControllingExport(null)
+    }
+  }
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 mb-2 animate-in">
@@ -298,8 +333,24 @@ export function TopReplaysPage(): JSX.Element {
         )}
         {(kaggleExport || driveExport) && (
           <div className="flex flex-col gap-2" style={{ marginTop: 12 }}>
-            {kaggleExport && <ExportProgress label="Kaggle Dataset" job={kaggleExport} />}
-            {driveExport && <ExportProgress label="Google Drive" job={driveExport} />}
+            {kaggleExport && (
+              <ExportProgress
+                label="Kaggle Dataset"
+                job={kaggleExport}
+                onPause={() => void handleExportControl(kaggleExport, 'pause')}
+                onResume={() => void handleExportControl(kaggleExport, 'resume')}
+                controlling={controllingExport === kaggleExport.job_id}
+              />
+            )}
+            {driveExport && (
+              <ExportProgress
+                label="Google Drive"
+                job={driveExport}
+                onPause={() => void handleExportControl(driveExport, 'pause')}
+                onResume={() => void handleExportControl(driveExport, 'resume')}
+                controlling={controllingExport === driveExport.job_id}
+              />
+            )}
           </div>
         )}
       </div>
@@ -384,9 +435,10 @@ export function TopReplaysPage(): JSX.Element {
   )
 }
 
-function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
+function ExportProgress({ label, job, onPause, onResume, controlling }: ExportProgressProps): JSX.Element {
   const status = exportStatus(job)
-  const isKaggle = job.target === 'kaggle_dataset'
+  const canControl = ACTIVE_EXPORT_STATUSES.has(job.status)
+  const isPaused = job.status === 'paused'
   return (
     <div
       className="flex items-center justify-between gap-3 flex-wrap"
@@ -400,32 +452,37 @@ function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
     >
       <div>
         <strong>{label}</strong>
-        {isKaggle ? (
-          <div
-            className="mono"
-            style={{ color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.65 }}
+        <div className="mono" style={{ color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.65 }}>
+          <div>Players: {job.completed_players} / {job.total_players}</div>
+          <div>Episodes: {job.completed_episodes} / {job.total_episodes}</div>
+          <div>Current rank: {job.current_rank ?? '—'}</div>
+          <div>Status: {status}</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {canControl && (
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={controlling}
+            onClick={isPaused ? onResume : onPause}
+            style={{ padding: '5px 9px' }}
           >
-            <div>Players prepared: {job.completed_players} / {job.total_players}</div>
-            <div>Players on Kaggle: {job.players_on_kaggle} / {job.total_players}</div>
-            <div>Current rank: {job.current_rank ?? '—'}</div>
-            <div>Kaggle version: {job.kaggle_version || '—'}</div>
-            <div>Status: {status}</div>
-          </div>
-        ) : (
-          <span style={{ color: 'var(--text-muted)' }}> · {status}</span>
+            {controlling ? 'Saving…' : isPaused ? 'Resume export' : 'Pause export'}
+          </button>
+        )}
+        {job.result_url && (
+          <a
+            href={job.result_url}
+            target="_blank"
+            rel="noreferrer"
+            className="btn-ghost"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 9px' }}
+          >
+            Open dataset <ArrowUpRightIcon size={13} />
+          </a>
         )}
       </div>
-      {job.result_url && (
-        <a
-          href={job.result_url}
-          target="_blank"
-          rel="noreferrer"
-          className="btn-ghost"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 9px' }}
-        >
-          Open dataset <ArrowUpRightIcon size={13} />
-        </a>
-      )}
     </div>
   )
 }
@@ -433,13 +490,17 @@ function ExportProgress({ label, job }: ExportProgressProps): JSX.Element {
 function exportStatus(job: Top100ExportJob): string {
   if (job.status === 'failed') return job.error ?? 'Failed'
   if (job.status === 'done') return 'Ready'
+  if (job.status === 'paused') return 'Paused. Progress is saved.'
+  if (job.status === 'waiting_for_rate_limit') {
+    return job.error ?? 'Kaggle rate limited. Waiting to retry.'
+  }
   if (job.status === 'uploading') return 'Publishing'
-  if (job.target === 'google_drive' && job.status === 'waiting_for_replays') {
+  if (job.status === 'waiting_for_replays') {
     return `resolving players ${job.resolved_players}/${job.total_players}`
   }
-  if (job.target === 'google_drive' && job.status === 'downloading') {
+  if (job.status === 'downloading') {
     const rank = job.current_rank ? `, rank ${job.current_rank}` : ''
     return `preparing ZIPs ${job.completed_players}/${job.total_players}${rank}`
   }
-  return 'Downloading'
+  return 'Queued'
 }

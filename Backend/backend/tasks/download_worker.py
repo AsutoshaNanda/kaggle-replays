@@ -12,13 +12,13 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..config import get_settings
 from ..database import AsyncSessionLocal
 from ..kaggle_service import episode_outcome, list_episodes_checked, open_page
 from ..logging_config import get_logger
-from ..models import DownloadJob, Submission
+from ..models import DownloadJob, ExportJob, Submission
 from ..session_manager import get_session_manager
 from ..utils.file_utils import delete_path, ensure_dir, make_zip, safe_output_path
 from ..utils.sanitize import sanitize_error
@@ -221,7 +221,13 @@ async def _download_replays(
     while pending:
         retryable: list[str] = []
         position = 0
+        round_hit_429 = False
         while position < len(pending):
+            await db.refresh(job, attribute_names=["status"])
+            if job.status == "cancelled":
+                delete_path(out_dir)
+                return None
+            await _wait_if_export_paused(db, job)
             await db.refresh(job, attribute_names=["status"])
             if job.status == "cancelled":
                 delete_path(out_dir)
@@ -247,6 +253,7 @@ async def _download_replays(
                     _log.warning("Replay fetch failed", episode_id=eid, status=status)
                 job.latest_episode_id = eid
             kaggle_throttle.record(429 if hit_429 else 200)
+            round_hit_429 = round_hit_429 or hit_429
             if hit_429:
                 batch_size = max(_BATCH_MIN, batch_size // 2)
                 successful_batches = 0
@@ -265,17 +272,60 @@ async def _download_replays(
         delay = min(_RETRY_CAP, _RETRY_BASE * (2 ** min(rate_limit_round, 7)))
         rate_limit_round += 1
         _log.warning(
-            "download.rate_limited",
+            "download.retrying",
             job=job.job_uuid,
             pending=len(pending),
             retry_in_seconds=delay,
+            rate_limited=round_hit_429,
         )
+        if round_hit_429:
+            await _set_export_rate_limit_wait(db, job, delay)
         await asyncio.sleep(delay)
+        if round_hit_429:
+            await _clear_export_rate_limit_wait(db, job)
     await db.refresh(job, attribute_names=["status"])
     if job.status == "cancelled":
         delete_path(out_dir)
         return None
     return completed
+
+
+async def _wait_if_export_paused(db, job: DownloadJob) -> None:
+    """Stop before the next Kaggle request while an owning export is paused."""
+    if job.export_job_id is None:
+        return
+    while True:
+        export = await db.get(ExportJob, job.export_job_id, populate_existing=True)
+        if export is None or export.status != "paused":
+            return
+        await asyncio.sleep(1)
+
+
+async def _set_export_rate_limit_wait(db, job: DownloadJob, delay: float) -> None:
+    """Expose a replay 429 as a persistent, resumable export state."""
+    if job.export_job_id is None:
+        return
+    await db.execute(
+        update(ExportJob)
+        .where(ExportJob.id == job.export_job_id, ExportJob.status != "paused")
+        .values(
+            status="waiting_for_rate_limit",
+            error_msg=f"Kaggle rate limit reached. Retrying in {int(delay)} seconds.",
+        )
+    )
+    await db.commit()
+
+
+async def _clear_export_rate_limit_wait(db, job: DownloadJob) -> None:
+    """Return to normal download progress unless the user paused the export."""
+    if job.export_job_id is None:
+        return
+    await db.execute(
+        update(ExportJob)
+        .where(ExportJob.id == job.export_job_id, ExportJob.status == "waiting_for_rate_limit")
+        .values(status="downloading", error_msg=None)
+    )
+    await db.commit()
 
 
 def _apply_filter(id_to_ep: dict, submission_kaggle_id: str, filter_mode: str) -> list[str]:
