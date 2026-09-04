@@ -175,9 +175,6 @@ export interface Top100ExportJob {
   total_players: number
   resolved_players: number
   completed_players: number
-  players_on_kaggle: number
-  kaggle_version: number
-  kaggle_status: 'pending' | 'ready' | 'error' | null
   total_episodes: number
   completed_episodes: number
   current_rank: number | null

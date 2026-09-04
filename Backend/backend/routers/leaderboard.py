@@ -67,6 +67,23 @@ async def _owned_competition(db: AsyncSession, user_id: int, competition_id: int
     return comp
 
 
+async def _owned_export_job(
+    db: AsyncSession, user_id: int, competition_id: int, job_uuid: str
+) -> ExportJob:
+    job = (
+        await db.execute(
+            select(ExportJob).where(
+                ExportJob.job_uuid == job_uuid,
+                ExportJob.user_id == user_id,
+                ExportJob.competition_id == competition_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Export not found")
+    return job
+
+
 async def _recently_synced(db: AsyncSession, competition: Competition) -> bool:
     """True if today's snapshot for this competition was captured very recently.
 
@@ -358,6 +375,64 @@ async def start_export(
         resource_type="export_job",
         resource_id=job.job_uuid,
         detail={"target": body.target, "public": body.public},
+    )
+    return Top100ExportJob(**export_worker.export_view(job))
+
+
+@router.post("/{competition_id}/exports/{job_uuid}/pause", response_model=Top100ExportJob)
+@limiter.limit("30/hour")
+async def pause_export(
+    request: Request,
+    competition_id: int,
+    job_uuid: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Top100ExportJob:
+    comp = await _owned_competition(db, current_user.id, competition_id)
+    job = await _owned_export_job(db, current_user.id, comp.id, job_uuid)
+    if job.status in ("done", "failed"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This export cannot be paused")
+    if job.status != "paused":
+        job.status = "paused"
+        job.error_msg = "Paused by user. Completed replays and ZIPs are saved."
+        await db.commit()
+    await write_audit(
+        db,
+        action="leaderboard.export.pause",
+        ip_address=request.state.client_ip,
+        status="success",
+        user_id=current_user.id,
+        resource_type="export_job",
+        resource_id=job.job_uuid,
+    )
+    return Top100ExportJob(**export_worker.export_view(job))
+
+
+@router.post("/{competition_id}/exports/{job_uuid}/resume", response_model=Top100ExportJob)
+@limiter.limit("30/hour")
+async def resume_export(
+    request: Request,
+    competition_id: int,
+    job_uuid: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Top100ExportJob:
+    comp = await _owned_competition(db, current_user.id, competition_id)
+    job = await _owned_export_job(db, current_user.id, comp.id, job_uuid)
+    if job.status != "paused":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This export is not paused")
+    job.status = "queued"
+    job.error_msg = None
+    await db.commit()
+    asyncio.create_task(export_worker.run_export_job(job.job_uuid))
+    await write_audit(
+        db,
+        action="leaderboard.export.resume",
+        ip_address=request.state.client_ip,
+        status="success",
+        user_id=current_user.id,
+        resource_type="export_job",
+        resource_id=job.job_uuid,
     )
     return Top100ExportJob(**export_worker.export_view(job))
 

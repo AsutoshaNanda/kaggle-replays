@@ -112,6 +112,26 @@ export async function startTop100Export(
   return data
 }
 
+export async function pauseTop100Export(
+  competitionId: number,
+  jobId: string,
+): Promise<Top100ExportJob> {
+  const { data } = await apiClient.post<Top100ExportJob>(
+    `/leaderboard/${competitionId}/exports/${jobId}/pause`,
+  )
+  return data
+}
+
+export async function resumeTop100Export(
+  competitionId: number,
+  jobId: string,
+): Promise<Top100ExportJob> {
+  const { data } = await apiClient.post<Top100ExportJob>(
+    `/leaderboard/${competitionId}/exports/${jobId}/resume`,
+  )
+  return data
+}
+
 export async function getLatestTop100Export(
   competitionId: number,
   target: Top100ExportTarget,
